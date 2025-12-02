@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test Identity Linking</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }
+    .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+    button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+    input { padding: 8px; margin: 5px; width: 250px; }
+    .output { background: #f5f5f5; padding: 10px; margin-top: 10px; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Test Identity Linking System</h1>
+
+  <div class="section">
+    <h2>Step 1: Load Recorder</h2>
+    <p>The recorder script should load automatically and generate a distinct_id.</p>
+    <button onclick="checkDistinctId()">Check Distinct ID</button>
+    <div id="distinctIdOutput" class="output"></div>
+  </div>
+
+  <div class="section">
+    <h2>Step 2: Identify User</h2>
+    <p>Link the current device to an email address:</p>
+    <input type="email" id="emailInput" placeholder="Enter email (e.g., alice@example.com)">
+    <button onclick="identifyUser()">Identify</button>
+    <div id="identifyOutput" class="output"></div>
+  </div>
+
+  <div class="section">
+    <h2>Step 3: Search Sessions by Email</h2>
+    <p>Retrieve all sessions for an email address:</p>
+    <input type="email" id="searchEmail" placeholder="Enter email to search">
+    <button onclick="searchSessions()">Search</button>
+    <div id="searchOutput" class="output"></div>
+  </div>
+
+  <div class="section">
+    <h2>Step 4: Simulate User Activity</h2>
+    <p>Click anywhere on this page to generate rrweb events. They will be sent automatically.</p>
+    <button onclick="alert('This click will be recorded!')">Click Me</button>
+  </div>
+
+  <!-- Load the recorder script -->
+  <script src="/recorder.js" data-domain-key="YOUR_DOMAIN_TOKEN_FOR_DOMAIN_COM"></script>
+
+  <script>
+    function checkDistinctId() {
+      const distinctId = localStorage.getItem('rrweb_distinct_id');
+      const sessionId = localStorage.getItem('rrweb_session_id');
+      const output = document.getElementById('distinctIdOutput');
+      output.innerHTML = `
+        <strong>Distinct ID (Permanent):</strong> ${distinctId || 'Not found'}<br>
+        <strong>Session ID (Current):</strong> ${sessionId || 'Not found'}
+      `;
+    }
+
+    function identifyUser() {
+      const email = document.getElementById('emailInput').value.trim();
+      const output = document.getElementById('identifyOutput');
+
+      if (!email) {
+        output.innerHTML = '<span style="color: red;">Please enter an email</span>';
+        return;
+      }
+
+      if (!window.recorder || !window.recorder.identify) {
+        output.innerHTML = '<span style="color: red;">Recorder not loaded yet</span>';
+        return;
+      }
+
+      output.innerHTML = 'Identifying...';
+
+      window.recorder.identify(email)
+        .then(function(data) {
+          output.innerHTML = `<span style="color: green;">✓ Successfully linked to ${email}</span><br>${JSON.stringify(data, null, 2)}`;
+        })
+        .catch(function(err) {
+          output.innerHTML = `<span style="color: red;">✗ Error: ${err.message}</span>`;
+        });
+    }
+
+    function searchSessions() {
+      const email = document.getElementById('searchEmail').value.trim();
+      const output = document.getElementById('searchOutput');
+
+      if (!email) {
+        output.innerHTML = '<span style="color: red;">Please enter an email</span>';
+        return;
+      }
+
+      output.innerHTML = 'Searching...';
+
+      fetch('/api/sessions?email=' + encodeURIComponent(email))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (data.sessions && data.sessions.length > 0) {
+            let html = `<strong>Found ${data.sessions.length} session(s):</strong><br><br>`;
+            data.sessions.forEach(function(session, idx) {
+              const date = new Date(session.first_timestamp);
+              html += `
+                <strong>Session ${idx + 1}:</strong><br>
+                - Session ID: ${session.session_id}<br>
+                - Distinct ID: ${session.distinct_id}<br>
+                - Date: ${date.toLocaleString()}<br>
+                - Chunks: ${session.chunk_count}<br>
+                - S3 Keys: ${session.s3_keys.join(', ')}<br><br>
+              `;
+            });
+            output.innerHTML = html;
+          } else {
+            output.innerHTML = `<span style="color: orange;">No sessions found for ${email}</span>`;
+          }
+        })
+        .catch(function(err) {
+          output.innerHTML = `<span style="color: red;">✗ Error: ${err.message}</span>`;
+        });
+    }
+
+    // Auto-check distinct ID on page load
+    setTimeout(checkDistinctId, 1000);
+  </script>
+</body>
+</html>

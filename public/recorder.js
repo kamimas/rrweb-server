@@ -55,6 +55,14 @@
         plugins.push(window.rrwebPluginConsoleRecord);
       }
 
+      // Generate persistent distinct_id (device/browser identity)
+      var DISTINCT_ID_KEY = "rrweb_distinct_id";
+      var distinctId = localStorage.getItem(DISTINCT_ID_KEY);
+      if (!distinctId) {
+        distinctId = "uid_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem(DISTINCT_ID_KEY, distinctId);
+      }
+
       // Use localStorage to persist a session ID across pages.
       var SESSION_ID_KEY = "rrweb_session_id";
       var EVENTS_KEY = "rrweb_events";
@@ -110,13 +118,14 @@
         if (events.length === 0) return;
         var payload = {
           sessionId: sessionId,
+          distinctId: distinctId,
           events: events,
           pageUrl: window.location.href,
           host: window.location.host,
           timestamp: Date.now(),
           domainToken: DOMAIN_TOKEN
         };
-        var url = "https://yourserver.com/upload-session"; // Update with your backend endpoint.
+        var url = "http://localhost:3000/upload-session"; // Update with your backend endpoint.
         var payloadStr = JSON.stringify(payload);
         var sent = false;
         try {
@@ -140,6 +149,40 @@
         events = [];
         saveEvents();
       }
+
+      // Expose global identify method for linking distinct_id to email
+      window.recorder = window.recorder || {};
+      window.recorder.identify = function(email) {
+        if (!email || typeof email !== "string") {
+          console.error("Recorder.identify: Invalid email provided");
+          return Promise.reject(new Error("Invalid email"));
+        }
+        var identifyPayload = {
+          email: email,
+          distinctId: distinctId
+        };
+        var identifyUrl = "http://localhost:3000/identify";
+        return fetch(identifyUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(identifyPayload),
+          credentials: "include"
+        })
+          .then(function(res) {
+            if (!res.ok) {
+              throw new Error("Failed to identify user");
+            }
+            return res.json();
+          })
+          .then(function(data) {
+            console.log("Recorder: User identified successfully:", email);
+            return data;
+          })
+          .catch(function(err) {
+            console.error("Recorder: Error identifying user:", err);
+            throw err;
+          });
+      };
 
       // Periodically send events and send on page unload.
       setInterval(sendEvents, 60000);
