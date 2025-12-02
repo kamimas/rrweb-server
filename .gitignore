@@ -1,0 +1,45 @@
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Session recordings (local testing)
+session.json
+session*.json
+public/sessions/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test/development files
+test.html
+*-simple.html
+*-simple.js
+standalone-*.html
+player-simple.html
+public/player.html
+public/playback-simple.html
+public/recorder-simple.js
+public/test.html
