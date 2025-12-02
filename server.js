@@ -8,6 +8,7 @@ const AWS = require("aws-sdk");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const fs = require("fs");
+const zlib = require("zlib");
 
 // Import rrdom packages (for potential server‑side DOM processing)
 const rrdom = require("rrdom");
@@ -20,12 +21,22 @@ const db = new Database(dbPath);
 
 // Initialize database schema
 db.exec(`
+  CREATE TABLE IF NOT EXISTS campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS session_chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
     distinct_id TEXT NOT NULL,
+    campaign_id INTEGER,
     s3_key TEXT UNIQUE NOT NULL,
-    timestamp INTEGER NOT NULL
+    local_key TEXT,
+    page_url TEXT,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
   );
 
   CREATE TABLE IF NOT EXISTS users (
@@ -41,20 +52,52 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id);
   CREATE INDEX IF NOT EXISTS idx_session_chunks_distinct_id ON session_chunks(distinct_id);
+  CREATE INDEX IF NOT EXISTS idx_session_chunks_campaign_id ON session_chunks(campaign_id);
   CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
+  CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
 `);
 
 console.log("✅ SQLite database initialized at:", dbPath);
 
 // Prepare statements for better performance
+const insertCampaign = db.prepare(`
+  INSERT INTO campaigns (name, created_at) VALUES (?, ?)
+`);
+
+const getCampaignByName = db.prepare(`
+  SELECT id, name, created_at FROM campaigns WHERE name = ?
+`);
+
+const getCampaignById = db.prepare(`
+  SELECT id, name, created_at FROM campaigns WHERE id = ?
+`);
+
+const getAllCampaigns = db.prepare(`
+  SELECT c.id, c.name, c.created_at,
+    (SELECT COUNT(DISTINCT sc.session_id) FROM session_chunks sc WHERE sc.campaign_id = c.id) as session_count
+  FROM campaigns c
+  ORDER BY c.created_at DESC
+`);
+
+const deleteCampaignById = db.prepare(`
+  DELETE FROM campaigns WHERE id = ?
+`);
+
+const deleteSessionChunksByCampaignId = db.prepare(`
+  DELETE FROM session_chunks WHERE campaign_id = ?
+`);
+
+const getSessionCountByCampaignId = db.prepare(`
+  SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE campaign_id = ?
+`);
+
 const insertSessionChunk = db.prepare(`
-  INSERT OR IGNORE INTO session_chunks (session_id, distinct_id, s3_key, timestamp)
-  VALUES (?, ?, ?, ?)
+  INSERT OR IGNORE INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, local_key, page_url, timestamp)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertUser = db.prepare(`
-  INSERT OR IGNORE INTO users (email)
-  VALUES (?)
+  INSERT OR IGNORE INTO users (email) VALUES (?)
 `);
 
 const getUserByEmail = db.prepare(`
@@ -62,8 +105,7 @@ const getUserByEmail = db.prepare(`
 `);
 
 const insertAlias = db.prepare(`
-  INSERT OR REPLACE INTO aliases (distinct_id, user_id)
-  VALUES (?, ?)
+  INSERT OR REPLACE INTO aliases (distinct_id, user_id) VALUES (?, ?)
 `);
 
 // Create local sessions directory for testing
@@ -92,16 +134,17 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
-app.use(express.json({ limit: "1mb" })); // Limit payload size
+// Raw body parser for gzipped requests
+app.use(express.raw({ type: "text/plain", limit: "5mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 60,             // Limit each IP to 60 requests per minute
+  windowMs: 60 * 1000,
+  max: 60,
 });
 app.use(limiter);
 
 // ----- Configuration Endpoint -----
-// Clients can query this endpoint to know if console plugins should be enabled.
 app.get("/config", (req, res) => {
   res.json({
     enableConsolePlugin: process.env.ENABLE_CONSOLE_PLUGIN === "true"
@@ -109,8 +152,6 @@ app.get("/config", (req, res) => {
 });
 
 // ----- Allowed Domains Configuration -----
-// ALLOWED_DOMAINS is a JSON string from the .env file mapping allowed domains
-// to their respective S3 buckets and pre‑shared tokens.
 let allowedDomains = {};
 try {
   allowedDomains = JSON.parse(process.env.ALLOWED_DOMAINS);
@@ -121,60 +162,342 @@ try {
 
 // ----- AWS Configuration -----
 AWS.config.update({
-  region: process.env.AWS_REGION // e.g. "us-east-1"
-  // AWS credentials are picked up from environment variables or IAM roles.
+  region: process.env.AWS_REGION
 });
 const s3 = new AWS.S3();
 
-// ----- Endpoint: /upload-session -----
-// Receives session data from the recorder and uploads it to S3.
-app.post("/upload-session", (req, res) => {
+// =====================================================
+// CAMPAIGN ENDPOINTS
+// =====================================================
+
+// Create campaign
+app.post("/api/campaigns", (req, res) => {
   try {
-    const { sessionId, events, pageUrl, host, timestamp, domainToken, distinctId } = req.body;
-    if (!sessionId || !Array.isArray(events) || events.length === 0 || !pageUrl || !host || !domainToken || !distinctId) {
-      return res.status(400).json({ error: "Invalid payload" });
+    const { name } = req.body;
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ error: "Missing or invalid campaign name" });
     }
 
-    // ----- Domain Verification (Backend) -----
+    const trimmedName = name.trim();
+
+    // Check if campaign already exists
+    const existing = getCampaignByName.get(trimmedName);
+    if (existing) {
+      return res.status(409).json({ error: "Campaign name already exists" });
+    }
+
+    const createdAt = Date.now();
+    const result = insertCampaign.run(trimmedName, createdAt);
+
+    console.log(`📋 Campaign created: ${trimmedName}`);
+    res.status(201).json({
+      id: result.lastInsertRowid,
+      name: trimmedName,
+      created_at: createdAt
+    });
+  } catch (err) {
+    console.error("Error in POST /api/campaigns:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// List campaigns
+app.get("/api/campaigns", (req, res) => {
+  try {
+    const campaigns = getAllCampaigns.all();
+    res.json({ campaigns });
+  } catch (err) {
+    console.error("Error in GET /api/campaigns:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get campaign by ID
+app.get("/api/campaigns/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const campaign = getCampaignById.get(id);
+
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const sessionCount = getSessionCountByCampaignId.get(id);
+    res.json({
+      ...campaign,
+      session_count: sessionCount?.count || 0
+    });
+  } catch (err) {
+    console.error("Error in GET /api/campaigns/:id:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Delete campaign (and all sessions)
+app.delete("/api/campaigns/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const campaign = getCampaignById.get(id);
+
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    // Get session count before deletion
+    const sessionCount = getSessionCountByCampaignId.get(id);
+
+    // Delete session chunks first (foreign key)
+    deleteSessionChunksByCampaignId.run(id);
+
+    // Delete campaign
+    deleteCampaignById.run(id);
+
+    console.log(`🗑️  Campaign deleted: ${campaign.name} (${sessionCount?.count || 0} sessions)`);
+    res.json({
+      success: true,
+      deleted_sessions: sessionCount?.count || 0
+    });
+  } catch (err) {
+    console.error("Error in DELETE /api/campaigns/:id:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =====================================================
+// SESSION ENDPOINTS
+// =====================================================
+
+// List sessions (by campaign or email)
+app.get("/api/sessions", (req, res) => {
+  try {
+    const { campaign_id, campaign, email } = req.query;
+
+    if (!campaign_id && !campaign && !email) {
+      return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
+    }
+
+    let sessions = [];
+
+    if (campaign_id || campaign) {
+      // Get campaign ID
+      let cid = campaign_id;
+      if (campaign && !campaign_id) {
+        const c = getCampaignByName.get(campaign);
+        if (!c) {
+          return res.status(404).json({ error: "Campaign not found" });
+        }
+        cid = c.id;
+      }
+
+      const query = `
+        SELECT
+          sc.session_id,
+          sc.distinct_id,
+          sc.campaign_id,
+          c.name as campaign_name,
+          MIN(sc.timestamp) as first_timestamp,
+          MAX(sc.timestamp) as last_timestamp,
+          (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
+          COUNT(sc.id) as chunk_count
+        FROM session_chunks sc
+        LEFT JOIN campaigns c ON sc.campaign_id = c.id
+        WHERE sc.campaign_id = ?
+        GROUP BY sc.session_id
+        ORDER BY first_timestamp DESC
+      `;
+      sessions = db.prepare(query).all(cid);
+    } else if (email) {
+      const query = `
+        SELECT
+          sc.session_id,
+          sc.distinct_id,
+          sc.campaign_id,
+          c.name as campaign_name,
+          MIN(sc.timestamp) as first_timestamp,
+          MAX(sc.timestamp) as last_timestamp,
+          (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
+          COUNT(sc.id) as chunk_count
+        FROM session_chunks sc
+        LEFT JOIN campaigns c ON sc.campaign_id = c.id
+        JOIN aliases a ON sc.distinct_id = a.distinct_id
+        JOIN users u ON a.user_id = u.id
+        WHERE u.email = ?
+        GROUP BY sc.session_id
+        ORDER BY first_timestamp DESC
+      `;
+      sessions = db.prepare(query).all(email);
+    }
+
+    // Add playback_url to each session
+    const transformedSessions = sessions.map(session => ({
+      ...session,
+      playback_url: `/api/sessions/${session.session_id}/playback`
+    }));
+
+    res.json({ sessions: transformedSessions });
+  } catch (err) {
+    console.error("Error in GET /api/sessions:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get session playback data (merged events from all chunks)
+app.get("/api/sessions/:session_id/playback", (req, res) => {
+  try {
+    const { session_id } = req.params;
+
+    // Get all chunks for this session
+    const query = `
+      SELECT sc.*, c.name as campaign_name
+      FROM session_chunks sc
+      LEFT JOIN campaigns c ON sc.campaign_id = c.id
+      WHERE sc.session_id = ?
+      ORDER BY sc.timestamp ASC
+    `;
+    const chunks = db.prepare(query).all(session_id);
+
+    if (chunks.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    // Merge events from all chunk files
+    let allEvents = [];
+    const pageUrls = [];
+
+    for (const chunk of chunks) {
+      // Try local file first
+      if (chunk.local_key) {
+        const localPath = path.join(sessionsDir, chunk.local_key);
+        if (fs.existsSync(localPath)) {
+          try {
+            const data = JSON.parse(fs.readFileSync(localPath, "utf8"));
+            if (data.events && Array.isArray(data.events)) {
+              allEvents = allEvents.concat(data.events);
+            }
+            if (data.pageUrl && !pageUrls.includes(data.pageUrl)) {
+              pageUrls.push(data.pageUrl);
+            }
+          } catch (readErr) {
+            console.error(`Error reading chunk file ${chunk.local_key}:`, readErr);
+          }
+        }
+      }
+    }
+
+    // Sort events by timestamp
+    allEvents.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+    const firstChunk = chunks[0];
+    const lastChunk = chunks[chunks.length - 1];
+
+    res.json({
+      session_id,
+      events: allEvents,
+      metadata: {
+        campaign_id: firstChunk.campaign_id,
+        campaign_name: firstChunk.campaign_name,
+        distinct_id: firstChunk.distinct_id,
+        duration_ms: lastChunk.timestamp - firstChunk.timestamp,
+        page_urls: pageUrls,
+        chunk_count: chunks.length
+      }
+    });
+  } catch (err) {
+    console.error("Error in GET /api/sessions/:session_id/playback:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =====================================================
+// UPLOAD SESSION (Modified to require campaign)
+// =====================================================
+
+app.post("/upload-session", async (req, res) => {
+  try {
+    // Handle gzip-compressed requests
+    let body = req.body;
+    if (req.query.compression === "gzip" && Buffer.isBuffer(req.body)) {
+      try {
+        const decompressed = zlib.gunzipSync(req.body);
+        body = JSON.parse(decompressed.toString("utf8"));
+        console.log(`📦 Decompressed: ${req.body.length} -> ${decompressed.length} bytes (${((1 - req.body.length / decompressed.length) * 100).toFixed(1)}% saved)`);
+      } catch (decompressErr) {
+        console.error("Error decompressing request:", decompressErr);
+        return res.status(400).json({ error: "Invalid compressed data" });
+      }
+    }
+
+    const { sessionId, events, pageUrl, host, timestamp, domainToken, distinctId, campaign } = body;
+
+    // Validate required fields
+    if (!sessionId || !Array.isArray(events) || events.length === 0 || !pageUrl || !host || !domainToken || !distinctId) {
+      return res.status(400).json({ error: "Invalid payload: missing required fields" });
+    }
+
+    // Validate campaign
+    if (!campaign || typeof campaign !== "string") {
+      return res.status(400).json({ error: "Missing campaign name" });
+    }
+
+    const campaignRecord = getCampaignByName.get(campaign);
+    if (!campaignRecord) {
+      return res.status(404).json({ error: `Campaign not found: ${campaign}` });
+    }
+
+    // Domain verification
     if (!(allowedDomains[host] && allowedDomains[host].token === domainToken)) {
       return res.status(403).json({ error: "Domain not allowed or token invalid" });
     }
-    const verifiedDomain = host; // Verified
+    const verifiedDomain = host;
 
-    // Determine the correct S3 bucket for this domain.
+    // Determine the correct S3 bucket for this domain
     const bucketName = allowedDomains[verifiedDomain].bucket;
     if (!bucketName) {
       return res.status(500).json({ error: "S3 bucket not configured for domain" });
     }
 
-    // ----- Save Session Data Locally (for testing) -----
+    // Save session data
     const fileName = `sessions/${sessionId}_${Date.now()}_${uuidv4()}.json`;
-    const sessionData = JSON.stringify({ sessionId, events, pageUrl, host: verifiedDomain, timestamp }, null, 2);
+    const sessionData = JSON.stringify({
+      sessionId,
+      events,
+      pageUrl,
+      host: verifiedDomain,
+      timestamp,
+      campaign: campaign
+    });
 
-    // Save locally in public/sessions directory
+    // Save locally
     const localFileName = `${sessionId}_${Date.now()}_${uuidv4()}.json`;
     const localFilePath = path.join(sessionsDir, localFileName);
 
     try {
       fs.writeFileSync(localFilePath, sessionData);
       console.log(`✅ Session saved locally: ${localFileName}`);
+      console.log(`📋 Campaign: ${campaign}`);
       console.log(`📊 Events captured: ${events.length}`);
       console.log(`🌐 Page URL: ${pageUrl}`);
-      console.log(`🔗 Local playback URL: http://localhost:${process.env.PORT || 3000}/sessions/${localFileName}`);
     } catch (writeErr) {
       console.error("Error saving session locally:", writeErr);
     }
 
-    // ----- Write to SQLite Index Database -----
+    // Write to SQLite
     try {
-      insertSessionChunk.run(sessionId, distinctId, fileName, timestamp);
-      console.log(`📇 Indexed session chunk: ${sessionId} -> ${distinctId}`);
+      insertSessionChunk.run(
+        sessionId,
+        distinctId,
+        campaignRecord.id,
+        fileName,
+        localFileName,
+        pageUrl,
+        timestamp
+      );
+      console.log(`📇 Indexed session chunk: ${sessionId} -> campaign:${campaign}`);
     } catch (dbErr) {
       console.error("Error writing to index database:", dbErr);
-      // Continue with S3 upload even if indexing fails
     }
 
-    // ----- Upload Session Data to S3 -----
+    // Upload to S3
     const params = {
       Bucket: bucketName,
       Key: fileName,
@@ -185,26 +508,14 @@ app.post("/upload-session", (req, res) => {
     s3.upload(params, (err, data) => {
       if (err) {
         console.error("Error uploading to S3:", err);
-        // Still return success if local save worked
-        const localUrl = `http://localhost:${process.env.PORT || 3000}/sessions/${localFileName}`;
         return res.json({
-          url: localUrl,
+          success: true,
           localOnly: true,
           message: "Session saved locally (S3 upload failed)"
         });
       }
-      // Generate a signed URL (expires in 1 hour) for secure playback.
-      const signedUrl = s3.getSignedUrl("getObject", {
-        Bucket: bucketName,
-        Key: fileName,
-        Expires: 3600
-      });
-      const localUrl = `http://localhost:${process.env.PORT || 3000}/sessions/${localFileName}`;
-      console.log(`☁️  S3 URL: ${signedUrl}`);
-      res.json({
-        url: signedUrl,
-        localUrl: localUrl
-      });
+      console.log(`☁️  Uploaded to S3: ${fileName}`);
+      res.json({ success: true });
     });
   } catch (err) {
     console.error("Error in /upload-session:", err);
@@ -212,8 +523,10 @@ app.post("/upload-session", (req, res) => {
   }
 });
 
-// ----- Endpoint: /identify -----
-// Links a distinct_id to an email address for session retrieval.
+// =====================================================
+// IDENTIFY ENDPOINT
+// =====================================================
+
 app.post("/identify", (req, res) => {
   try {
     const { email, distinctId } = req.body;
@@ -221,22 +534,17 @@ app.post("/identify", (req, res) => {
       return res.status(400).json({ error: "Missing email or distinctId" });
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: "Invalid email format" });
     }
 
-    // Insert user (ignore if already exists)
     insertUser.run(email);
-
-    // Get user ID
     const user = getUserByEmail.get(email);
     if (!user) {
       return res.status(500).json({ error: "Failed to retrieve user ID" });
     }
 
-    // Link distinct_id to user_id
     insertAlias.run(distinctId, user.id);
 
     console.log(`🔗 Identity linked: ${distinctId} -> ${email}`);
@@ -247,49 +555,7 @@ app.post("/identify", (req, res) => {
   }
 });
 
-// ----- Endpoint: /api/sessions -----
-// Retrieves sessions for a given email address (grouped by session_id).
-app.get("/api/sessions", (req, res) => {
-  try {
-    const { email } = req.query;
-    if (!email) {
-      return res.status(400).json({ error: "Missing email parameter" });
-    }
-
-    // Query sessions with JOIN
-    const query = `
-      SELECT
-        sc.session_id,
-        sc.distinct_id,
-        GROUP_CONCAT(sc.s3_key, '|') as s3_keys,
-        MIN(sc.timestamp) as first_timestamp,
-        MAX(sc.timestamp) as last_timestamp,
-        COUNT(sc.id) as chunk_count
-      FROM session_chunks sc
-      JOIN aliases a ON sc.distinct_id = a.distinct_id
-      JOIN users u ON a.user_id = u.id
-      WHERE u.email = ?
-      GROUP BY sc.session_id
-      ORDER BY first_timestamp DESC
-    `;
-
-    const sessions = db.prepare(query).all(email);
-
-    // Transform s3_keys from pipe-delimited string to array
-    const transformedSessions = sessions.map(session => ({
-      ...session,
-      s3_keys: session.s3_keys.split('|')
-    }));
-
-    console.log(`🔍 Found ${transformedSessions.length} sessions for ${email}`);
-    res.json({ sessions: transformedSessions });
-  } catch (err) {
-    console.error("Error in /api/sessions:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ----- Serve Static Files (e.g. Recorder & Playback Pages) -----
+// ----- Serve Static Files -----
 app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 3000;
