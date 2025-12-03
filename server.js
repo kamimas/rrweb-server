@@ -116,6 +116,25 @@ if (!fs.existsSync(sessionsDir)) {
 
 const app = express();
 
+// ----- CORS Middleware -----
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  // Allow requests from allowed domains
+  if (origin && allowedDomains[origin.replace(/^https?:\/\//, '')]) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
+
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // ----- Security Middleware -----
 app.use(helmet({
   contentSecurityPolicy: {
@@ -429,25 +448,35 @@ app.post("/upload-session", async (req, res) => {
 
     const { sessionId, events, pageUrl, host, timestamp, domainToken, distinctId, campaign } = body;
 
+    console.log(`📥 Upload received - Session: ${sessionId}, Host: ${host}, Campaign: ${campaign}, Events: ${events?.length || 0}`);
+
     // Validate required fields
     if (!sessionId || !Array.isArray(events) || events.length === 0 || !pageUrl || !host || !domainToken || !distinctId) {
+      console.log(`❌ Validation failed - sessionId: ${!!sessionId}, events: ${Array.isArray(events) && events.length > 0}, pageUrl: ${!!pageUrl}, host: ${!!host}, token: ${!!domainToken}, distinctId: ${!!distinctId}`);
       return res.status(400).json({ error: "Invalid payload: missing required fields" });
     }
 
     // Validate campaign
     if (!campaign || typeof campaign !== "string") {
+      console.log(`❌ Campaign validation failed: ${campaign}`);
       return res.status(400).json({ error: "Missing campaign name" });
     }
 
     const campaignRecord = getCampaignByName.get(campaign);
     if (!campaignRecord) {
+      console.log(`❌ Campaign not found: ${campaign}`);
       return res.status(404).json({ error: `Campaign not found: ${campaign}` });
     }
+    console.log(`✅ Campaign validated: ${campaign} (ID: ${campaignRecord.id})`);
 
     // Domain verification
+    console.log(`🔍 Verifying domain: ${host}, Token provided: ${domainToken?.substring(0, 10)}...`);
     if (!(allowedDomains[host] && allowedDomains[host].token === domainToken)) {
+      console.log(`❌ Domain verification failed for: ${host}`);
+      console.log(`   Allowed domains:`, Object.keys(allowedDomains));
       return res.status(403).json({ error: "Domain not allowed or token invalid" });
     }
+    console.log(`✅ Domain verified: ${host}`);
     const verifiedDomain = host;
 
     // Determine the correct S3 bucket for this domain

@@ -8,19 +8,50 @@ The backend validates each session using a pre-shared domain token and routes se
 
 Optional console log recording and replay can be enabled via configuration.
 
+## Quick Start (React/Next.js)
+
+The fastest way to add session recording to your React or Next.js app:
+
+```tsx
+// 1. Add scripts to your layout
+<Script id="rrweb-config" strategy="beforeInteractive">
+  {`window.RRWEB_SERVER_URL = "http://localhost:3000/upload-session";`}
+</Script>
+<Script
+  src="http://localhost:3000/recorder.js"
+  strategy="afterInteractive"
+  data-domain-key="YOUR_TOKEN_HERE"
+/>
+
+// 2. Wrap your app
+import { RecorderProvider } from '@/components/RecorderProvider'
+
+<RecorderProvider campaign="my_app" autoStart={true}>
+  {children}
+</RecorderProvider>
+```
+
+That's it! Sessions are now being recorded. See [RECORDER_PROVIDER_GUIDE.md](./RECORDER_PROVIDER_GUIDE.md) for full documentation.
+
 ## Features
 
-- **Continuous Session Capture:** Uses localStorage to merge events across page navigations.
-- **Enhanced Recording:**  
-  - **rrdom & rrdom-nodejs** for DOM snapshot handling.  
-  - **rrvideo** for video operations.  
-  - **Sequential ID Plugins** for recording and replay.  
-  - **Optional Console Plugins** for recording/replaying console logs.
-- **Multi-Domain Support:** The backend verifies incoming sessions (via a pre-shared token) and routes data to per‑domain S3 buckets.
-- **Secure Uploads:** Sessions are stored in AWS S3 with signed URLs (valid for 1 hour) for secure playback.
-- **Playback Interface:** A simple page to load sessions via URL with sequential ID and optional console replay support.
-- **Dockerized:** Easily build and deploy via Docker.
-- **Hosted Recorder Script:** Easily embed the recorder by adding a single `<script>` tag. (Hosted via jsDelivr)
+- **Campaign-Based Recording:** Organize recordings by purpose (checkout_flow, bug_reports, etc.)
+- **React Integration:** `RecorderProvider` component with hooks for seamless React/Next.js integration
+- **Lazy Loading:** Libraries load on-demand (92% reduction in initial page load: 130KB → 10KB)
+- **User Identification:** Link sessions to user emails for support and debugging
+- **Continuous Session Capture:** Uses localStorage to merge events across page navigations
+- **Enhanced Recording:**
+  - **rrdom & rrdom-nodejs** for DOM snapshot handling
+  - **rrvideo** for video operations
+  - **Sequential ID Plugins** for recording and replay
+  - **Optional Console Plugins** for recording/replaying console logs
+- **Multi-Domain Support:** Backend verifies incoming sessions via pre-shared tokens
+- **Secure Uploads:** Sessions stored in AWS S3 with signed URLs (valid for 1 hour)
+- **SQLite Indexing:** Fast session lookup by campaign, email, or session ID
+- **Gzip Compression:** ~80% reduction in upload payload size
+- **Playback Interface:** Simple player to load and replay sessions
+- **Dockerized:** Easily build and deploy via Docker
+- **TypeScript Support:** Full type definitions for React integration
 
 
 
@@ -45,22 +76,52 @@ docker build -t rrweb-session-capture .
 docker run -p 3000:3000 --env-file .env rrweb-session-capture
 ```
 
-**Recorder Script Integration:**
+## Recorder Script Integration
 
+### Option 1: React/Next.js (Recommended)
 
-**Recorder Script Integration (Self-Hosted):**
+For React and Next.js projects, use the `RecorderProvider` component for the simplest integration:
+
+```tsx
+import { RecorderProvider } from '@/components/RecorderProvider'
+
+<RecorderProvider campaign="my_app" autoStart={true}>
+  {children}
+</RecorderProvider>
+```
+
+**Benefits:**
+- One-line integration
+- Auto-start recording
+- Auto-identify users
+- TypeScript support
+- React hooks API
+
+See [RECORDER_PROVIDER_GUIDE.md](./RECORDER_PROVIDER_GUIDE.md) for complete React integration guide.
+
+### Option 2: Plain HTML/JavaScript (Self-Hosted)
 
 Download the `recorder.js` file from the repository and host it on your own server. Then, on your website, include the recorder script in your `<head>` tag as follows:
+```html
+<script  src="https://yourdomain.com/path/to/recorder.js"
+data-domain-key="YOUR_DOMAIN_TOKEN_FOR_DOMAIN_COM"></script>
 ```
-`<script  src="https://yourdomain.com/path/to/recorder.js"  
-data-domain-key="YOUR_DOMAIN_TOKEN_FOR_DOMAIN_COM"></script>` 
-``` 
 Replace `https://yourdomain.com/path/to/recorder.js` with the actual URL where you host the file, and update the `data-domain-key` value with the token for your domain.
 
+See [FRONTEND_INTEGRATION_GUIDE.md](./FRONTEND_INTEGRATION_GUIDE.md) for detailed integration examples.
 
-**Playback:**
+
+## Playback
 
 Access the playback interface at http://yourserver:3000/playback.html and enter a session URL to view recordings.
+
+## Documentation
+
+- **[RECORDER_PROVIDER_GUIDE.md](./RECORDER_PROVIDER_GUIDE.md)** - Complete React/Next.js integration guide with RecorderProvider
+- **[FRONTEND_INTEGRATION_GUIDE.md](./FRONTEND_INTEGRATION_GUIDE.md)** - Manual integration guide for all frameworks
+- **[NEXTJS_APP_ROUTER_INTEGRATION.md](./NEXTJS_APP_ROUTER_INTEGRATION.md)** - Next.js 13+ App Router specific lessons and troubleshooting
+- **[LAZY_LOADING_IMPLEMENTATION.md](./LAZY_LOADING_IMPLEMENTATION.md)** - Performance optimization details and lazy loading implementation
+- **[docs/API.md](./docs/API.md)** - Complete API reference for server endpoints and recorder methods
 
 ## Contributing
 

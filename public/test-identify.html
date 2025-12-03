@@ -44,7 +44,7 @@
   </div>
 
   <!-- Load the recorder script -->
-  <script src="/recorder.js" data-domain-key="YOUR_DOMAIN_TOKEN_FOR_DOMAIN_COM"></script>
+  <script src="/recorder.js" data-domain-key="6d4a8cd0fb6b363742837691f30f5fe852c507446ee6f1199521a9b445465596"></script>
 
   <script>
     function checkDistinctId() {
@@ -121,6 +121,20 @@
 
     // Auto-check distinct ID on page load
     setTimeout(checkDistinctId, 1000);
+
+    // Start recording when recorder is ready
+    if (window.recorder && window.recorder.ready) {
+      window.recorder.ready.then(function() {
+        console.log('Recorder is ready!');
+        window.recorder.startRecording({
+          campaign: 'test_identify_campaign',
+          timeout: 10 * 60 * 1000  // 10 minutes
+        });
+        console.log('Recording started for campaign: test_identify_campaign');
+      }).catch(function(err) {
+        console.error('Recorder failed to load:', err);
+      });
+    }
   </script>
 </body>
 </html>

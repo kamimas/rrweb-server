@@ -1,4 +1,4 @@
-// public/recorder.js - LAZY LOADING VERSION
+// public/recorder.js
 (function() {
   "use strict";
 
@@ -32,7 +32,6 @@
   var saveEventsDebounced = null;
   var timeoutTimer = null;
   var librariesLoaded = false;
-  var librariesLoading = false;
 
   // Utility: dynamically load external scripts
   function loadScript(src) {
@@ -47,45 +46,6 @@
       };
       document.head.appendChild(script);
     });
-  }
-
-  // Lazy load rrweb libraries
-  function loadLibraries() {
-    if (librariesLoaded) {
-      return Promise.resolve();
-    }
-
-    if (librariesLoading) {
-      // Already loading, wait for it
-      return new Promise(function(resolve) {
-        var checkLoaded = setInterval(function() {
-          if (librariesLoaded) {
-            clearInterval(checkLoaded);
-            resolve();
-          }
-        }, 100);
-      });
-    }
-
-    librariesLoading = true;
-    console.log("Recorder: Lazy loading rrweb libraries...");
-
-    var libs = [
-      "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js",
-      "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"
-    ];
-
-    return Promise.all(libs.map(loadScript))
-      .then(function() {
-        librariesLoaded = true;
-        librariesLoading = false;
-        console.log("Recorder: Libraries loaded successfully");
-      })
-      .catch(function(err) {
-        librariesLoading = false;
-        console.error("Recorder: Failed to load libraries:", err);
-        throw err;
-      });
   }
 
   // Generate or retrieve distinct_id
@@ -275,8 +235,13 @@
     saveEvents();
   }
 
-  // Start rrweb recording - LAZY LOADS LIBRARIES FIRST
+  // Start rrweb recording
   function startRecordingInternal(options) {
+    if (!librariesLoaded) {
+      console.error("Recorder: Libraries not loaded yet. Wait for recorder.ready promise.");
+      return;
+    }
+
     options = options || {};
 
     // Campaign is required
@@ -312,26 +277,19 @@
     updateLastActivity();
     loadStoredEvents();
 
-    // LAZY LOAD: Load libraries first, then start recording
-    loadLibraries()
-      .then(function() {
-        try {
-          stopFn = rrweb.record({
-            emit: function(event) {
-              events.push(event);
-              updateLastActivity();
-              saveEventsDebounced();
-            }
-          });
-          isRecordingActive = true;
-          console.log("Recorder: Recording started, campaign:", currentCampaign, "session:", sessionId);
-        } catch (err) {
-          console.error("Recorder: Error starting rrweb recording:", err);
-        }
-      })
-      .catch(function(err) {
-        console.error("Recorder: Failed to start recording - libraries failed to load:", err);
+    try {
+      stopFn = rrweb.record({
+        emit: function(event) {
+          events.push(event);
+          updateLastActivity();
+          saveEventsDebounced();
+        },
       });
+      isRecordingActive = true;
+      console.log("Recorder: Recording started, campaign:", currentCampaign, "session:", sessionId);
+    } catch (err) {
+      console.error("Recorder: Error starting rrweb recording:", err);
+    }
   }
 
   // Stop rrweb recording
@@ -385,13 +343,31 @@
       return;
     }
 
-    console.log("Recorder: Resuming recording for campaign:", savedCampaign);
+    // Resume recording with remaining timeout
+    currentCampaign = savedCampaign;
+    sessionId = getOrCreateSessionId();
+    updateLastActivity();
+    loadStoredEvents();
 
-    // Resume recording with saved campaign
-    startRecordingInternal({
-      campaign: savedCampaign,
-      timeout: getRemainingTimeout() || undefined
-    });
+    // Resume timeout timer if there was one
+    var remaining = getRemainingTimeout();
+    if (remaining !== null && remaining > 0) {
+      setupTimeoutTimer(remaining);
+    }
+
+    try {
+      stopFn = rrweb.record({
+        emit: function(event) {
+          events.push(event);
+          updateLastActivity();
+          saveEventsDebounced();
+        },
+      });
+      isRecordingActive = true;
+      console.log("Recorder: Recording resumed, campaign:", currentCampaign, "session:", sessionId);
+    } catch (err) {
+      console.error("Recorder: Error resuming rrweb recording:", err);
+    }
   }
 
   // Initialize the recorder
@@ -399,13 +375,19 @@
     distinctId = getOrCreateDistinctId();
     saveEventsDebounced = debounce(saveEvents, 500);
 
-    // Expose public API immediately (NO library loading yet)
+    // Create ready promise
+    var readyResolve;
+    var readyPromise = new Promise(function(resolve) {
+      readyResolve = resolve;
+    });
+
+    // Expose public API immediately (before libraries load)
     window.recorder = window.recorder || {};
     window.recorder.startRecording = startRecordingInternal;
     window.recorder.stopRecording = stopRecordingInternal;
     window.recorder.isRecording = isRecordingInternal;
     window.recorder.getCampaign = getCampaignInternal;
-    window.recorder.ready = Promise.resolve(); // Always ready - libraries load on-demand
+    window.recorder.ready = readyPromise;
     window.recorder.identify = function(email) {
       if (!email || typeof email !== "string") {
         console.error("Recorder.identify: Invalid email provided");
@@ -434,27 +416,41 @@
         });
     };
 
-    console.log("Recorder: Initialized (libraries will load on-demand)");
+    // Fetch config and load libraries
+    var configUrl = window.RRWEB_SERVER_URL
+      ? window.RRWEB_SERVER_URL.replace("/upload-session", "/config")
+      : "/config";
 
-    // Check if in manual mode
-    var config = window.RRWEB_CONFIG || {};
-    var manualMode = config.manualMode === true;
+    fetch(configUrl)
+      .then(function(res) { return res.json(); })
+      .then(function(config) {
+        var libs = [
+          "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js",
+          "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"
+        ];
+        // Skip console plugin for now - it has compatibility issues
+        return Promise.all(libs.map(loadScript)).then(function() { return config; });
+      })
+      .then(function(config) {
+        // Plugins ready (console plugin disabled for compatibility)
+        librariesLoaded = true;
+        readyResolve();
 
-    if (manualMode) {
-      console.log("Recorder: Manual mode enabled - auto-resume disabled");
-    } else {
-      // Try to resume if there was an active recording
-      tryResumeRecording();
-    }
+        // Try to resume if there was an active recording
+        tryResumeRecording();
 
-    // Periodic send + beforeunload
-    setInterval(function() {
-      if (isRecordingActive) sendEvents();
-    }, 60000);
+        // Periodic send + beforeunload
+        setInterval(function() {
+          if (isRecordingActive) sendEvents();
+        }, 60000);
 
-    window.addEventListener("beforeunload", function() {
-      if (isRecordingActive) sendEvents();
-    });
+        window.addEventListener("beforeunload", function() {
+          if (isRecordingActive) sendEvents();
+        });
+      })
+      .catch(function(err) {
+        console.error("Recorder: Error loading configuration or libraries:", err);
+      });
   }
 
   init();
