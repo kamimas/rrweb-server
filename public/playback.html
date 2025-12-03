@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>Session Playback</title>
-  <link rel="stylesheet" href="https://unpkg.com/rrweb-player@latest/dist/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/style.css">
   <style>
     #playerContainer { margin-top: 20px; }
     form { margin-bottom: 20px; }
@@ -25,7 +25,7 @@
   </div>
 
   <!-- Load rrweb-player -->
-  <script src="https://unpkg.com/rrweb-player@latest/dist/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js"></script>
   <script>
     // Utility to dynamically load external scripts.
     function loadScript(src) {
@@ -54,7 +54,10 @@
         .then(function(config) {
           const promises = [];
           if (config.enableConsolePlugin) {
-            promises.push(loadScript("https://unpkg.com/@rrweb/rrweb-plugin-console-replay@latest/dist/index.umd.min.js"));
+            promises.push(
+              loadScript("https://cdn.jsdelivr.net/npm/@rrweb/rrweb-plugin-console-replay@latest/dist/index.umd.cjs")
+                .catch(function() { console.warn("Console replay plugin failed to load, skipping"); })
+            );
           }
           return Promise.all(promises).then(function() { return config; });
         })

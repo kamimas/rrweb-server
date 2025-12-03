@@ -16,7 +16,9 @@ const rrdomNodejs = require("rrdom-nodejs");
 
 // ----- SQLite Database Setup -----
 const Database = require("better-sqlite3");
-const dbPath = path.join(__dirname, "db.sqlite");
+// Use /app/data in Docker, local directory otherwise
+const dbDir = process.env.NODE_ENV === "production" ? "/app/data" : __dirname;
+const dbPath = path.join(dbDir, "db.sqlite");
 const db = new Database(dbPath);
 
 // Initialize database schema
@@ -50,7 +52,14 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    status TEXT DEFAULT NULL,
+    updated_at INTEGER
+  );
+
   CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
   CREATE INDEX IF NOT EXISTS idx_session_chunks_distinct_id ON session_chunks(distinct_id);
   CREATE INDEX IF NOT EXISTS idx_session_chunks_campaign_id ON session_chunks(campaign_id);
   CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
@@ -106,6 +115,15 @@ const getUserByEmail = db.prepare(`
 
 const insertAlias = db.prepare(`
   INSERT OR REPLACE INTO aliases (distinct_id, user_id) VALUES (?, ?)
+`);
+
+const upsertSessionStatus = db.prepare(`
+  INSERT INTO sessions (session_id, status, updated_at) VALUES (?, ?, ?)
+  ON CONFLICT(session_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
+`);
+
+const getSessionStatus = db.prepare(`
+  SELECT status FROM sessions WHERE session_id = ?
 `);
 
 // Create local sessions directory for testing
@@ -286,19 +304,52 @@ app.delete("/api/campaigns/:id", (req, res) => {
 // SESSION ENDPOINTS
 // =====================================================
 
-// List sessions (by campaign or email)
+// List sessions (by campaign, email, and/or status)
 app.get("/api/sessions", (req, res) => {
   try {
-    const { campaign_id, campaign, email } = req.query;
+    const { campaign_id, campaign, email, status } = req.query;
 
     if (!campaign_id && !campaign && !email) {
       return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
     }
 
+    // Validate status if provided
+    if (status && !["completed", "dropped_off"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
+    }
+
     let sessions = [];
+    let params = [];
+
+    // Build query based on filters
+    let baseQuery = `
+      SELECT
+        sc.session_id,
+        sc.distinct_id,
+        sc.campaign_id,
+        c.name as campaign_name,
+        s.status,
+        MIN(sc.timestamp) as first_timestamp,
+        MAX(sc.timestamp) as last_timestamp,
+        (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
+        COUNT(sc.id) as chunk_count
+      FROM session_chunks sc
+      LEFT JOIN campaigns c ON sc.campaign_id = c.id
+      LEFT JOIN sessions s ON sc.session_id = s.session_id
+    `;
+
+    let whereClauses = [];
+
+    if (email) {
+      baseQuery += `
+      JOIN aliases a ON sc.distinct_id = a.distinct_id
+      JOIN users u ON a.user_id = u.id
+      `;
+      whereClauses.push("u.email = ?");
+      params.push(email);
+    }
 
     if (campaign_id || campaign) {
-      // Get campaign ID
       let cid = campaign_id;
       if (campaign && !campaign_id) {
         const c = getCampaignByName.get(campaign);
@@ -307,49 +358,35 @@ app.get("/api/sessions", (req, res) => {
         }
         cid = c.id;
       }
-
-      const query = `
-        SELECT
-          sc.session_id,
-          sc.distinct_id,
-          sc.campaign_id,
-          c.name as campaign_name,
-          MIN(sc.timestamp) as first_timestamp,
-          MAX(sc.timestamp) as last_timestamp,
-          (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
-          COUNT(sc.id) as chunk_count
-        FROM session_chunks sc
-        LEFT JOIN campaigns c ON sc.campaign_id = c.id
-        WHERE sc.campaign_id = ?
-        GROUP BY sc.session_id
-        ORDER BY first_timestamp DESC
-      `;
-      sessions = db.prepare(query).all(cid);
-    } else if (email) {
-      const query = `
-        SELECT
-          sc.session_id,
-          sc.distinct_id,
-          sc.campaign_id,
-          c.name as campaign_name,
-          MIN(sc.timestamp) as first_timestamp,
-          MAX(sc.timestamp) as last_timestamp,
-          (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
-          COUNT(sc.id) as chunk_count
-        FROM session_chunks sc
-        LEFT JOIN campaigns c ON sc.campaign_id = c.id
-        JOIN aliases a ON sc.distinct_id = a.distinct_id
-        JOIN users u ON a.user_id = u.id
-        WHERE u.email = ?
-        GROUP BY sc.session_id
-        ORDER BY first_timestamp DESC
-      `;
-      sessions = db.prepare(query).all(email);
+      whereClauses.push("sc.campaign_id = ?");
+      params.push(cid);
     }
 
-    // Add playback_url to each session
+    if (status) {
+      if (status === "dropped_off") {
+        // dropped_off = no status set OR explicitly set to dropped_off
+        whereClauses.push("(s.status IS NULL OR s.status = 'dropped_off')");
+      } else {
+        whereClauses.push("s.status = ?");
+        params.push(status);
+      }
+    }
+
+    if (whereClauses.length > 0) {
+      baseQuery += " WHERE " + whereClauses.join(" AND ");
+    }
+
+    baseQuery += `
+      GROUP BY sc.session_id
+      ORDER BY first_timestamp DESC
+    `;
+
+    sessions = db.prepare(baseQuery).all(...params);
+
+    // Add playback_url and normalize status
     const transformedSessions = sessions.map(session => ({
       ...session,
+      status: session.status || "dropped_off",  // Default to dropped_off if null
       playback_url: `/api/sessions/${session.session_id}/playback`
     }));
 
@@ -423,6 +460,31 @@ app.get("/api/sessions/:session_id/playback", (req, res) => {
     });
   } catch (err) {
     console.error("Error in GET /api/sessions/:session_id/playback:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Set session status
+app.post("/api/sessions/:session_id/status", (req, res) => {
+  try {
+    const { session_id } = req.params;
+    const { status } = req.body;
+
+    if (!status || !["completed", "dropped_off"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
+    }
+
+    // Check if session exists in chunks
+    const chunk = db.prepare("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1").get(session_id);
+    if (!chunk) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    upsertSessionStatus.run(session_id, status, Date.now());
+    console.log(`🏷️  Session status updated: ${session_id} -> ${status}`);
+    res.json({ success: true, session_id, status });
+  } catch (err) {
+    console.error("Error in POST /api/sessions/:session_id/status:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

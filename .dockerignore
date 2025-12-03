@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Database (will be created fresh or mounted)
+*.sqlite
+*.sqlite3
+*.db
+data/
+
+# Environment files (secrets)
+.env
+.env.*
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Development files
+src/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test files
+public/sessions/

@@ -42,7 +42,7 @@
       script.async = true;
       script.onload = resolve;
       script.onerror = function(err) {
-        console.error("Failed to load script:", src, err);
+        console.error("Recorder: Failed to load script:", src);
         reject(err);
       };
       document.head.appendChild(script);
@@ -56,7 +56,6 @@
     }
 
     if (librariesLoading) {
-      // Already loading, wait for it
       return new Promise(function(resolve) {
         var checkLoaded = setInterval(function() {
           if (librariesLoaded) {
@@ -68,7 +67,6 @@
     }
 
     librariesLoading = true;
-    console.log("Recorder: Lazy loading rrweb libraries...");
 
     var libs = [
       "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js",
@@ -79,7 +77,6 @@
       .then(function() {
         librariesLoaded = true;
         librariesLoading = false;
-        console.log("Recorder: Libraries loaded successfully");
       })
       .catch(function(err) {
         librariesLoading = false;
@@ -137,7 +134,7 @@
         }
       }
     } catch (err) {
-      console.error("Recorder: Error parsing stored rrweb events:", err);
+      console.error("Recorder: Error parsing stored events:", err);
     }
     events = [];
   }
@@ -198,7 +195,6 @@
       clearTimeout(timeoutTimer);
     }
     timeoutTimer = setTimeout(function() {
-      console.log("Recorder: Timeout reached, stopping recording");
       stopRecordingInternal();
     }, durationMs);
   }
@@ -232,7 +228,7 @@
         compressed = fflate.gzipSync(fflate.strToU8(payloadStr));
       }
     } catch (err) {
-      console.error("Recorder: Compression failed, sending uncompressed:", err);
+      // Fallback to uncompressed
     }
 
     try {
@@ -246,7 +242,7 @@
         }
       }
     } catch (err) {
-      console.error("Recorder: Error using sendBeacon:", err);
+      // Fallback to fetch
     }
 
     if (!sent) {
@@ -256,18 +252,14 @@
           headers: { "Content-Type": "text/plain" },
           body: compressed,
           credentials: "include"
-        }).catch(function(err) {
-          console.error("Recorder: Failed to send events via fetch:", err);
-        });
+        }).catch(function() {});
       } else {
         fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payloadStr,
           credentials: "include"
-        }).catch(function(err) {
-          console.error("Recorder: Failed to send events via fetch:", err);
-        });
+        }).catch(function() {});
       }
     }
 
@@ -324,20 +316,18 @@
             }
           });
           isRecordingActive = true;
-          console.log("Recorder: Recording started, campaign:", currentCampaign, "session:", sessionId);
         } catch (err) {
-          console.error("Recorder: Error starting rrweb recording:", err);
+          console.error("Recorder: Error starting recording:", err);
         }
       })
       .catch(function(err) {
-        console.error("Recorder: Failed to start recording - libraries failed to load:", err);
+        console.error("Recorder: Failed to start recording:", err);
       });
   }
 
   // Stop rrweb recording
   function stopRecordingInternal() {
     if (!isRecordingActive) {
-      console.warn("Recorder: Not currently recording");
       return;
     }
 
@@ -355,11 +345,8 @@
     clearTimeoutState();
 
     // Clear campaign
-    var stoppedCampaign = currentCampaign;
     currentCampaign = null;
     localStorage.removeItem(CAMPAIGN_KEY);
-
-    console.log("Recorder: Recording stopped, campaign:", stoppedCampaign);
   }
 
   // Check if recording is active
@@ -379,13 +366,10 @@
 
     // Check if timeout expired
     if (isTimeoutExpired()) {
-      console.log("Recorder: Previous recording timeout expired, not resuming");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
       return;
     }
-
-    console.log("Recorder: Resuming recording for campaign:", savedCampaign);
 
     // Resume recording with saved campaign
     startRecordingInternal({
@@ -425,7 +409,6 @@
           return res.json();
         })
         .then(function(data) {
-          console.log("Recorder: User identified successfully:", email);
           return data;
         })
         .catch(function(err) {
@@ -434,15 +417,46 @@
         });
     };
 
-    console.log("Recorder: Initialized (libraries will load on-demand)");
+    window.recorder.setStatus = function(status) {
+      if (!status || !["completed", "dropped_off"].includes(status)) {
+        console.error("Recorder.setStatus: Invalid status. Must be 'completed' or 'dropped_off'");
+        return Promise.reject(new Error("Invalid status"));
+      }
+      if (!sessionId) {
+        console.error("Recorder.setStatus: No active session. Make sure startRecording was called first.");
+        return Promise.reject(new Error("No active session"));
+      }
+      var statusUrl = window.RRWEB_SERVER_URL
+        ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/sessions/" + sessionId + "/status")
+        : "http://localhost:3000/api/sessions/" + sessionId + "/status";
+      return fetch(statusUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: status }),
+        credentials: "include"
+      })
+        .then(function(res) {
+          if (!res.ok) throw new Error("Failed to set session status");
+          return res.json();
+        })
+        .then(function(data) {
+          return data;
+        })
+        .catch(function(err) {
+          console.error("Recorder: Error setting session status:", err);
+          throw err;
+        });
+    };
+
+    window.recorder.getSessionId = function() {
+      return sessionId;
+    };
 
     // Check if in manual mode
     var config = window.RRWEB_CONFIG || {};
     var manualMode = config.manualMode === true;
 
-    if (manualMode) {
-      console.log("Recorder: Manual mode enabled - auto-resume disabled");
-    } else {
+    if (!manualMode) {
       // Try to resume if there was an active recording
       tryResumeRecording();
     }

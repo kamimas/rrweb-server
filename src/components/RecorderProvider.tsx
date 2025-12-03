@@ -14,6 +14,8 @@ interface Recorder {
   isRecording(): boolean
   getCampaign(): string | null
   identify(email: string): Promise<any>
+  setStatus(status: 'completed' | 'dropped_off'): Promise<any>
+  getSessionId(): string | null
 }
 
 interface RecorderContextValue {
@@ -23,6 +25,8 @@ interface RecorderContextValue {
   stopRecording: () => void
   isRecording: boolean
   identify: (email: string) => Promise<void>
+  setStatus: (status: 'completed' | 'dropped_off') => Promise<void>
+  getSessionId: () => string | null
 }
 
 const RecorderContext = createContext<RecorderContextValue | null>(null)
@@ -110,6 +114,19 @@ export function RecorderProvider({
     await recorder.identify(email)
   }
 
+  const setStatus = async (status: 'completed' | 'dropped_off') => {
+    if (!recorder) {
+      console.warn('Recorder: Not ready yet')
+      return
+    }
+    await recorder.setStatus(status)
+  }
+
+  const getSessionId = () => {
+    if (!recorder) return null
+    return recorder.getSessionId()
+  }
+
   const value: RecorderContextValue = {
     recorder,
     isReady,
@@ -117,6 +134,8 @@ export function RecorderProvider({
     stopRecording,
     isRecording,
     identify,
+    setStatus,
+    getSessionId,
   }
 
   return (
