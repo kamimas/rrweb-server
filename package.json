@@ -19,6 +19,8 @@
     "helmet": "^6.0.1",
     "rrdom": "latest",
     "rrdom-nodejs": "latest",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3"
   }
 }
