@@ -7,10 +7,19 @@ const rateLimit = require("express-rate-limit");
 const AWS = require("aws-sdk");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
-const fs = require("fs");
 const zlib = require("zlib");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const NodeCache = require("node-cache");
+
+// ----- Session Playback Cache -----
+// TTL: 10 minutes, check for expired keys every 2 minutes, max 100 sessions cached
+const sessionCache = new NodeCache({
+  stdTTL: 600,
+  checkperiod: 120,
+  maxKeys: 100,
+  useClones: false  // Don't clone on get (faster, we're read-only)
+});
 
 // ----- Auth Configuration -----
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret-in-production";
@@ -54,7 +63,7 @@ db.exec(`
     distinct_id TEXT NOT NULL,
     campaign_id INTEGER,
     s3_key TEXT UNIQUE NOT NULL,
-    local_key TEXT,
+    s3_bucket TEXT NOT NULL,
     page_url TEXT,
     timestamp INTEGER NOT NULL,
     FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
@@ -86,6 +95,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
   CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
 `);
+
+// Migration: Add s3_bucket column if it doesn't exist (for existing databases)
+try {
+  db.exec(`ALTER TABLE session_chunks ADD COLUMN s3_bucket TEXT`);
+  console.log("✅ Migration: Added s3_bucket column to session_chunks");
+} catch (e) {
+  // Column already exists, ignore
+}
+
+// Migration: Remove local_key column by recreating table (if upgrading from old schema)
+// We just ignore local_key going forward - SQLite doesn't support DROP COLUMN easily
 
 console.log("✅ SQLite database initialized at:", dbPath);
 
@@ -128,7 +148,7 @@ const getSessionCountByCampaignId = db.prepare(`
 `);
 
 const insertSessionChunk = db.prepare(`
-  INSERT OR IGNORE INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, local_key, page_url, timestamp)
+  INSERT OR IGNORE INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp)
   VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
@@ -152,12 +172,6 @@ const upsertSessionStatus = db.prepare(`
 const getSessionStatus = db.prepare(`
   SELECT status FROM sessions WHERE session_id = ?
 `);
-
-// Create local sessions directory for testing
-const sessionsDir = path.join(__dirname, "public", "sessions");
-if (!fs.existsSync(sessionsDir)) {
-  fs.mkdirSync(sessionsDir, { recursive: true });
-}
 
 const app = express();
 
@@ -586,10 +600,18 @@ app.get("/api/sessions", (req, res) => {
   }
 });
 
-// Get session playback data (merged events from all chunks)
-app.get("/api/sessions/:session_id/playback", (req, res) => {
+// Get session playback data (merged events from all chunks, fetched from S3)
+// Uses in-memory cache + parallel S3 fetching for performance
+app.get("/api/sessions/:session_id/playback", async (req, res) => {
   try {
     const { session_id } = req.params;
+
+    // Check cache first
+    const cached = sessionCache.get(session_id);
+    if (cached) {
+      console.log(`⚡ Cache hit for session: ${session_id}`);
+      return res.json(cached);
+    }
 
     // Get all chunks for this session
     const query = `
@@ -605,27 +627,44 @@ app.get("/api/sessions/:session_id/playback", (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    // Merge events from all chunk files
+    // Filter valid chunks
+    const validChunks = chunks.filter(chunk => chunk.s3_key && chunk.s3_bucket);
+    if (validChunks.length === 0) {
+      return res.status(404).json({ error: "No valid session data found" });
+    }
+
+    // Fetch all chunks from S3 in PARALLEL
+    console.log(`📥 Fetching ${validChunks.length} chunks from S3 for session: ${session_id}`);
+    const fetchStart = Date.now();
+
+    const chunkPromises = validChunks.map(async (chunk) => {
+      try {
+        const s3Response = await s3.getObject({
+          Bucket: chunk.s3_bucket,
+          Key: chunk.s3_key
+        }).promise();
+        return JSON.parse(s3Response.Body.toString("utf8"));
+      } catch (s3Err) {
+        console.error(`Error fetching chunk from S3 (${chunk.s3_bucket}/${chunk.s3_key}):`, s3Err.message);
+        return null;
+      }
+    });
+
+    const chunkResults = await Promise.all(chunkPromises);
+    const fetchDuration = Date.now() - fetchStart;
+    console.log(`⏱️  Fetched ${validChunks.length} chunks in ${fetchDuration}ms`);
+
+    // Merge events and collect page URLs
     let allEvents = [];
     const pageUrls = [];
 
-    for (const chunk of chunks) {
-      // Try local file first
-      if (chunk.local_key) {
-        const localPath = path.join(sessionsDir, chunk.local_key);
-        if (fs.existsSync(localPath)) {
-          try {
-            const data = JSON.parse(fs.readFileSync(localPath, "utf8"));
-            if (data.events && Array.isArray(data.events)) {
-              allEvents = allEvents.concat(data.events);
-            }
-            if (data.pageUrl && !pageUrls.includes(data.pageUrl)) {
-              pageUrls.push(data.pageUrl);
-            }
-          } catch (readErr) {
-            console.error(`Error reading chunk file ${chunk.local_key}:`, readErr);
-          }
-        }
+    for (const data of chunkResults) {
+      if (!data) continue;
+      if (data.events && Array.isArray(data.events)) {
+        allEvents = allEvents.concat(data.events);
+      }
+      if (data.pageUrl && !pageUrls.includes(data.pageUrl)) {
+        pageUrls.push(data.pageUrl);
       }
     }
 
@@ -635,7 +674,7 @@ app.get("/api/sessions/:session_id/playback", (req, res) => {
     const firstChunk = chunks[0];
     const lastChunk = chunks[chunks.length - 1];
 
-    res.json({
+    const result = {
       session_id,
       events: allEvents,
       metadata: {
@@ -644,9 +683,16 @@ app.get("/api/sessions/:session_id/playback", (req, res) => {
         distinct_id: firstChunk.distinct_id,
         duration_ms: lastChunk.timestamp - firstChunk.timestamp,
         page_urls: pageUrls,
-        chunk_count: chunks.length
+        chunk_count: chunks.length,
+        cached: false
       }
-    });
+    };
+
+    // Cache the result
+    sessionCache.set(session_id, result);
+    console.log(`💾 Cached session: ${session_id} (${allEvents.length} events)`);
+
+    res.json(result);
   } catch (err) {
     console.error("Error in GET /api/sessions/:session_id/playback:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -706,22 +752,27 @@ app.get("/api/sessions/:session_id", (req, res) => {
 });
 
 // Delete session (auth required)
-app.delete("/api/sessions/:session_id", authenticateJWT, (req, res) => {
+app.delete("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
-    // Check if session exists
-    const chunk = db.prepare("SELECT local_key FROM session_chunks WHERE session_id = ?").all(session_id);
-    if (chunk.length === 0) {
+    // Check if session exists and get S3 info
+    const chunks = db.prepare("SELECT s3_key, s3_bucket FROM session_chunks WHERE session_id = ?").all(session_id);
+    if (chunks.length === 0) {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    // Delete local files
-    for (const c of chunk) {
-      if (c.local_key) {
-        const localPath = path.join(sessionsDir, c.local_key);
-        if (fs.existsSync(localPath)) {
-          fs.unlinkSync(localPath);
+    // Delete from S3
+    for (const chunk of chunks) {
+      if (chunk.s3_key && chunk.s3_bucket) {
+        try {
+          await s3.deleteObject({
+            Bucket: chunk.s3_bucket,
+            Key: chunk.s3_key
+          }).promise();
+          console.log(`🗑️  Deleted from S3: ${chunk.s3_bucket}/${chunk.s3_key}`);
+        } catch (s3Err) {
+          console.error(`Error deleting from S3 (${chunk.s3_key}):`, s3Err.message);
         }
       }
     }
@@ -732,8 +783,11 @@ app.delete("/api/sessions/:session_id", authenticateJWT, (req, res) => {
     // Delete from sessions (status)
     db.prepare("DELETE FROM sessions WHERE session_id = ?").run(session_id);
 
+    // Invalidate cache
+    sessionCache.del(session_id);
+
     console.log(`🗑️  Session deleted: ${session_id}`);
-    res.json({ success: true, deleted_chunks: chunk.length });
+    res.json({ success: true, deleted_chunks: chunks.length });
   } catch (err) {
     console.error("Error in DELETE /api/sessions/:session_id:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -849,8 +903,8 @@ app.post("/upload-session", async (req, res) => {
       return res.status(500).json({ error: "S3 bucket not configured for domain" });
     }
 
-    // Save session data
-    const fileName = `sessions/${sessionId}_${Date.now()}_${uuidv4()}.json`;
+    // Prepare session data for S3
+    const s3Key = `sessions/${sessionId}_${Date.now()}_${uuidv4()}.json`;
     const sessionData = JSON.stringify({
       sessionId,
       events,
@@ -860,56 +914,38 @@ app.post("/upload-session", async (req, res) => {
       campaign: campaign
     });
 
-    // Save locally
-    const localFileName = `${sessionId}_${Date.now()}_${uuidv4()}.json`;
-    const localFilePath = path.join(sessionsDir, localFileName);
-
-    try {
-      fs.writeFileSync(localFilePath, sessionData);
-      console.log(`✅ Session saved locally: ${localFileName}`);
-      console.log(`📋 Campaign: ${campaign}`);
-      console.log(`📊 Events captured: ${events.length}`);
-      console.log(`🌐 Page URL: ${pageUrl}`);
-    } catch (writeErr) {
-      console.error("Error saving session locally:", writeErr);
-    }
-
-    // Write to SQLite
-    try {
-      insertSessionChunk.run(
-        sessionId,
-        distinctId,
-        campaignRecord.id,
-        fileName,
-        localFileName,
-        pageUrl,
-        timestamp
-      );
-      console.log(`📇 Indexed session chunk: ${sessionId} -> campaign:${campaign}`);
-    } catch (dbErr) {
-      console.error("Error writing to index database:", dbErr);
-    }
-
     // Upload to S3
     const params = {
       Bucket: bucketName,
-      Key: fileName,
+      Key: s3Key,
       Body: sessionData,
       ContentType: "application/json"
     };
 
-    s3.upload(params, (err, data) => {
-      if (err) {
-        console.error("Error uploading to S3:", err);
-        return res.json({
-          success: true,
-          localOnly: true,
-          message: "Session saved locally (S3 upload failed)"
-        });
-      }
-      console.log(`☁️  Uploaded to S3: ${fileName}`);
-      res.json({ success: true });
-    });
+    try {
+      await s3.upload(params).promise();
+      console.log(`☁️  Uploaded to S3: s3://${bucketName}/${s3Key}`);
+      console.log(`📋 Campaign: ${campaign}`);
+      console.log(`📊 Events captured: ${events.length}`);
+      console.log(`🌐 Page URL: ${pageUrl}`);
+
+      // Write to SQLite after successful S3 upload
+      insertSessionChunk.run(
+        sessionId,
+        distinctId,
+        campaignRecord.id,
+        s3Key,
+        bucketName,
+        pageUrl,
+        timestamp
+      );
+      console.log(`📇 Indexed session chunk: ${sessionId} -> campaign:${campaign}`);
+
+      res.json({ success: true, s3_key: s3Key });
+    } catch (uploadErr) {
+      console.error("Error uploading to S3:", uploadErr);
+      return res.status(500).json({ error: "Failed to upload session to S3" });
+    }
   } catch (err) {
     console.error("Error in /upload-session:", err);
     res.status(500).json({ error: "Internal server error" });
