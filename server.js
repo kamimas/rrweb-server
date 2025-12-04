@@ -246,6 +246,22 @@ const authenticateJWT = (req, res, next) => {
   }
 };
 
+// ----- Domain Token Middleware (for frontend recorder endpoints) -----
+const validateDomainToken = (req, res, next) => {
+  const { host, domainToken } = req.body;
+
+  if (!host || !domainToken) {
+    return res.status(400).json({ error: "Missing host or domainToken" });
+  }
+
+  if (!allowedDomains[host] || allowedDomains[host].token !== domainToken) {
+    return res.status(403).json({ error: "Invalid domain or token" });
+  }
+
+  req.verifiedDomain = host;
+  next();
+};
+
 // =====================================================
 // AUTH ENDPOINTS
 // =====================================================
@@ -333,8 +349,8 @@ app.post("/api/campaigns", authenticateJWT, (req, res) => {
   }
 });
 
-// List campaigns
-app.get("/api/campaigns", (req, res) => {
+// List campaigns (auth required)
+app.get("/api/campaigns", authenticateJWT, (req, res) => {
   try {
     const campaigns = getAllCampaigns.all();
     res.json({ campaigns });
@@ -344,8 +360,8 @@ app.get("/api/campaigns", (req, res) => {
   }
 });
 
-// Get campaign by ID
-app.get("/api/campaigns/:id", (req, res) => {
+// Get campaign by ID (auth required)
+app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
   try {
     const { id } = req.params;
     const campaign = getCampaignById.get(id);
@@ -446,8 +462,8 @@ app.delete("/api/campaigns/:id", authenticateJWT, (req, res) => {
 // SESSION ENDPOINTS
 // =====================================================
 
-// Search sessions by email (MUST be before :session_id route)
-app.get("/api/sessions/search", (req, res) => {
+// Search sessions by email (auth required, MUST be before :session_id route)
+app.get("/api/sessions/search", authenticateJWT, (req, res) => {
   try {
     const { email } = req.query;
 
@@ -494,8 +510,8 @@ app.get("/api/sessions/search", (req, res) => {
   }
 });
 
-// List sessions (by campaign, email, and/or status)
-app.get("/api/sessions", (req, res) => {
+// List sessions (auth required)
+app.get("/api/sessions", authenticateJWT, (req, res) => {
   try {
     const { campaign_id, campaign, email, status } = req.query;
 
@@ -600,9 +616,8 @@ app.get("/api/sessions", (req, res) => {
   }
 });
 
-// Get session playback data (merged events from all chunks, fetched from S3)
-// Uses in-memory cache + parallel S3 fetching for performance
-app.get("/api/sessions/:session_id/playback", async (req, res) => {
+// Get session playback data (auth required)
+app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
@@ -699,8 +714,8 @@ app.get("/api/sessions/:session_id/playback", async (req, res) => {
   }
 });
 
-// Get single session
-app.get("/api/sessions/:session_id", (req, res) => {
+// Get single session (auth required)
+app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
   try {
     const { session_id } = req.params;
 
@@ -820,8 +835,8 @@ app.post("/api/sessions/:session_id/watched", authenticateJWT, (req, res) => {
   }
 });
 
-// Set session status
-app.post("/api/sessions/:session_id/status", (req, res) => {
+// Set session status (domain token required)
+app.post("/api/sessions/:session_id/status", validateDomainToken, (req, res) => {
   try {
     const { session_id } = req.params;
     const { status } = req.body;
@@ -951,7 +966,7 @@ app.post("/upload-session", async (req, res) => {
 // IDENTIFY ENDPOINT
 // =====================================================
 
-app.post("/identify", (req, res) => {
+app.post("/identify", validateDomainToken, (req, res) => {
   try {
     const { email, distinctId } = req.body;
     if (!email || !distinctId) {
@@ -983,7 +998,7 @@ app.post("/identify", (req, res) => {
 // STATS ENDPOINT
 // =====================================================
 
-app.get("/api/stats", (req, res) => {
+app.get("/api/stats", authenticateJWT, (req, res) => {
   try {
     const totalCampaigns = db.prepare("SELECT COUNT(*) as count FROM campaigns").get().count;
     const totalSessions = db.prepare("SELECT COUNT(DISTINCT session_id) as count FROM session_chunks").get().count;
