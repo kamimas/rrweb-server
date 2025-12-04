@@ -12,6 +12,8 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - ALLOWED_DOMAINS=${ALLOWED_DOMAINS}
       - ENABLE_CONSOLE_PLUGIN=${ENABLE_CONSOLE_PLUGIN:-true}
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_USERS=${ADMIN_USERS}
     volumes:
       # Persist SQLite database
       - ./data:/app/data
