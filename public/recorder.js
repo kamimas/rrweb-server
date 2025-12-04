@@ -2,12 +2,39 @@
 (function() {
   "use strict";
 
+  // Logging utility
+  var LOG_PREFIX = "🎥 [rrweb]";
+  function log(message, data) {
+    if (data !== undefined) {
+      console.log(LOG_PREFIX + " " + message, data);
+    } else {
+      console.log(LOG_PREFIX + " " + message);
+    }
+  }
+  function logWarn(message, data) {
+    if (data !== undefined) {
+      console.warn(LOG_PREFIX + " ⚠️ " + message, data);
+    } else {
+      console.warn(LOG_PREFIX + " ⚠️ " + message);
+    }
+  }
+  function logError(message, data) {
+    if (data !== undefined) {
+      console.error(LOG_PREFIX + " ❌ " + message, data);
+    } else {
+      console.error(LOG_PREFIX + " ❌ " + message);
+    }
+  }
+
+  log("Initializing recorder...");
+
   // Read the domain key from the script tag's data attribute
   var DOMAIN_TOKEN = document.currentScript.getAttribute("data-domain-key");
   if (!DOMAIN_TOKEN) {
-    console.error("Recorder: No domain key provided. Please include data-domain-key attribute.");
+    logError("No domain key provided. Please include data-domain-key attribute.");
     return;
   }
+  log("Domain token found: " + DOMAIN_TOKEN.substring(0, 10) + "...");
 
   // Storage keys
   var DISTINCT_ID_KEY = "rrweb_distinct_id";
@@ -91,6 +118,9 @@
     if (!id) {
       id = "uid_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
       localStorage.setItem(DISTINCT_ID_KEY, id);
+      log("Created new distinct ID: " + id);
+    } else {
+      log("Using existing distinct ID: " + id);
     }
     return id;
   }
@@ -116,9 +146,15 @@
       localStorage.setItem(SESSION_ID_KEY, newSessionId);
       localStorage.removeItem(EVENTS_KEY);
       events = [];
+      if (existingSessionId) {
+        log("🔄 Session expired (idle > 30min). Created new session: " + newSessionId);
+      } else {
+        log("🆕 Created new session: " + newSessionId);
+      }
       return newSessionId;
     }
 
+    log("📌 Resuming existing session: " + existingSessionId);
     return existingSessionId;
   }
 
@@ -201,11 +237,21 @@
 
   // Send events to the backend
   function sendEvents() {
-    if (events.length === 0) return;
-    if (!currentCampaign) {
-      console.error("Recorder: No campaign set, cannot send events");
+    if (events.length === 0) {
+      log("📤 No events to send (buffer empty)");
       return;
     }
+    if (!currentCampaign) {
+      logError("No campaign set, cannot send events");
+      return;
+    }
+
+    var eventCount = events.length;
+    log("📤 Sending " + eventCount + " events to server...", {
+      sessionId: sessionId,
+      campaign: currentCampaign,
+      pageUrl: window.location.href
+    });
 
     var payload = {
       sessionId: sessionId,
@@ -226,9 +272,10 @@
     try {
       if (window.fflate) {
         compressed = fflate.gzipSync(fflate.strToU8(payloadStr));
+        log("📦 Compressed payload: " + payloadStr.length + " -> " + compressed.length + " bytes");
       }
     } catch (err) {
-      // Fallback to uncompressed
+      logWarn("Compression failed, sending uncompressed");
     }
 
     try {
@@ -240,26 +287,46 @@
           var blob = new Blob([payloadStr], { type: "application/json" });
           sent = navigator.sendBeacon(url, blob);
         }
+        if (sent) {
+          log("✅ Events sent via sendBeacon (" + eventCount + " events)");
+        }
       }
     } catch (err) {
-      // Fallback to fetch
+      logWarn("sendBeacon failed, falling back to fetch");
     }
 
     if (!sent) {
+      log("📡 Sending events via fetch...");
       if (compressed) {
         fetch(url + "?compression=gzip", {
           method: "POST",
           headers: { "Content-Type": "text/plain" },
           body: compressed,
           credentials: "include"
-        }).catch(function() {});
+        }).then(function(res) {
+          if (res.ok) {
+            log("✅ Events sent via fetch (" + eventCount + " events)");
+          } else {
+            logError("Server returned error: " + res.status);
+          }
+        }).catch(function(err) {
+          logError("Failed to send events: " + err.message);
+        });
       } else {
         fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payloadStr,
           credentials: "include"
-        }).catch(function() {});
+        }).then(function(res) {
+          if (res.ok) {
+            log("✅ Events sent via fetch (" + eventCount + " events)");
+          } else {
+            logError("Server returned error: " + res.status);
+          }
+        }).catch(function(err) {
+          logError("Failed to send events: " + err.message);
+        });
       }
     }
 
@@ -271,19 +338,22 @@
   function startRecordingInternal(options) {
     options = options || {};
 
+    log("▶️ startRecording() called", options);
+
     // Campaign is required
     if (!options.campaign || typeof options.campaign !== "string") {
-      console.error("Recorder: campaign is required. Usage: recorder.startRecording({ campaign: 'my-campaign' })");
+      logError("Campaign is required. Usage: recorder.startRecording({ campaign: 'my-campaign' })");
       return;
     }
 
     if (isRecordingActive) {
-      console.warn("Recorder: Already recording");
+      logWarn("Already recording for campaign: " + currentCampaign);
       return;
     }
 
     // Check if previous timeout expired - if so, clear state
     if (isTimeoutExpired()) {
+      log("⏰ Previous recording timeout expired, clearing state");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
     }
@@ -291,12 +361,14 @@
     // Set campaign
     currentCampaign = options.campaign;
     localStorage.setItem(CAMPAIGN_KEY, currentCampaign);
+    log("📋 Campaign set: " + currentCampaign);
 
     // Handle timeout
     if (options.timeout && typeof options.timeout === "number" && options.timeout > 0) {
       localStorage.setItem(TIMEOUT_START_KEY, Date.now().toString());
       localStorage.setItem(TIMEOUT_DURATION_KEY, options.timeout.toString());
       setupTimeoutTimer(options.timeout);
+      log("⏱️ Recording timeout set: " + (options.timeout / 1000) + " seconds");
     }
 
     // Get or create session (new if idle > 30min)
@@ -304,33 +376,54 @@
     updateLastActivity();
     loadStoredEvents();
 
+    log("📚 Loading rrweb libraries...");
+
     // LAZY LOAD: Load libraries first, then start recording
     loadLibraries()
       .then(function() {
         try {
+          var eventCounter = 0;
           stopFn = rrweb.record({
             emit: function(event) {
               events.push(event);
+              eventCounter++;
               updateLastActivity();
               saveEventsDebounced();
+              // Log every 10th event to avoid spam, or first 3 events
+              if (eventCounter <= 3 || eventCounter % 10 === 0) {
+                log("🔴 Recording event #" + eventCounter + " (type: " + event.type + ", total buffered: " + events.length + ")");
+              }
             }
           });
           isRecordingActive = true;
-          console.log("🎬 Recorder: Recording started", { sessionId: sessionId, campaign: currentCampaign });
+          log("🎬 ========================================");
+          log("🎬 RECORDING STARTED");
+          log("🎬 Session ID: " + sessionId);
+          log("🎬 Campaign: " + currentCampaign);
+          log("🎬 Distinct ID: " + distinctId);
+          log("🎬 Page: " + window.location.href);
+          log("🎬 ========================================");
         } catch (err) {
-          console.error("Recorder: Error starting recording:", err);
+          logError("Error starting rrweb recording: " + err.message);
         }
       })
       .catch(function(err) {
-        console.error("Recorder: Failed to start recording:", err);
+        logError("Failed to load libraries: " + err.message);
       });
   }
 
   // Stop rrweb recording
   function stopRecordingInternal() {
     if (!isRecordingActive) {
+      log("⏹️ stopRecording() called but not currently recording");
       return;
     }
+
+    log("⏹️ ========================================");
+    log("⏹️ STOPPING RECORDING");
+    log("⏹️ Session ID: " + sessionId);
+    log("⏹️ Campaign: " + currentCampaign);
+    log("⏹️ ========================================");
 
     // Flush pending events before stopping
     sendEvents();
@@ -348,6 +441,8 @@
     // Clear campaign
     currentCampaign = null;
     localStorage.removeItem(CAMPAIGN_KEY);
+
+    log("✅ Recording stopped successfully");
   }
 
   // Check if recording is active
@@ -363,15 +458,20 @@
   // Resume recording if it was active before page navigation
   function tryResumeRecording() {
     var savedCampaign = localStorage.getItem(CAMPAIGN_KEY);
-    if (!savedCampaign) return;
+    if (!savedCampaign) {
+      log("🔍 No saved campaign found, not auto-resuming");
+      return;
+    }
 
     // Check if timeout expired
     if (isTimeoutExpired()) {
+      log("⏰ Saved campaign timeout expired, clearing state");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
       return;
     }
 
+    log("🔄 Auto-resuming recording for campaign: " + savedCampaign);
     // Resume recording with saved campaign
     startRecordingInternal({
       campaign: savedCampaign,
@@ -392,13 +492,15 @@
     window.recorder.getCampaign = getCampaignInternal;
     window.recorder.ready = Promise.resolve(); // Always ready - libraries load on-demand
     window.recorder.identify = function(email) {
+      log("👤 identify() called with email: " + email);
       if (!email || typeof email !== "string") {
-        console.error("Recorder.identify: Invalid email provided");
+        logError("Invalid email provided to identify()");
         return Promise.reject(new Error("Invalid email"));
       }
       var identifyUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/identify")
         : "http://localhost:3000/identify";
+      log("👤 Sending identify request to: " + identifyUrl);
       return fetch(identifyUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -410,26 +512,33 @@
           return res.json();
         })
         .then(function(data) {
+          log("👤 ========================================");
+          log("👤 USER IDENTIFIED");
+          log("👤 Email: " + email);
+          log("👤 Distinct ID: " + distinctId);
+          log("👤 ========================================");
           return data;
         })
         .catch(function(err) {
-          console.error("Recorder: Error identifying user:", err);
+          logError("Failed to identify user: " + err.message);
           throw err;
         });
     };
 
     window.recorder.setStatus = function(status) {
+      log("🏷️ setStatus() called with: " + status);
       if (!status || !["completed", "dropped_off"].includes(status)) {
-        console.error("Recorder.setStatus: Invalid status. Must be 'completed' or 'dropped_off'");
+        logError("Invalid status. Must be 'completed' or 'dropped_off'");
         return Promise.reject(new Error("Invalid status"));
       }
       if (!sessionId) {
-        console.error("Recorder.setStatus: No active session. Make sure startRecording was called first.");
+        logError("No active session. Make sure startRecording was called first.");
         return Promise.reject(new Error("No active session"));
       }
       var statusUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/sessions/" + sessionId + "/status")
         : "http://localhost:3000/api/sessions/" + sessionId + "/status";
+      log("🏷️ Sending status update to: " + statusUrl);
       return fetch(statusUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -441,10 +550,15 @@
           return res.json();
         })
         .then(function(data) {
+          log("🏷️ ========================================");
+          log("🏷️ SESSION STATUS UPDATED");
+          log("🏷️ Session ID: " + sessionId);
+          log("🏷️ Status: " + status);
+          log("🏷️ ========================================");
           return data;
         })
         .catch(function(err) {
-          console.error("Recorder: Error setting session status:", err);
+          logError("Failed to set session status: " + err.message);
           throw err;
         });
     };
@@ -464,12 +578,21 @@
 
     // Periodic send + beforeunload
     setInterval(function() {
-      if (isRecordingActive) sendEvents();
+      if (isRecordingActive) {
+        log("⏰ Periodic flush triggered (60s interval)");
+        sendEvents();
+      }
     }, 60000);
 
     window.addEventListener("beforeunload", function() {
-      if (isRecordingActive) sendEvents();
+      if (isRecordingActive) {
+        log("🚪 Page unload detected, flushing events...");
+        sendEvents();
+      }
     });
+
+    log("✅ Recorder initialized successfully");
+    log("📖 Available methods: recorder.startRecording(), recorder.stopRecording(), recorder.identify(), recorder.setStatus(), recorder.isRecording(), recorder.getSessionId()");
   }
 
   init();
