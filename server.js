@@ -830,12 +830,7 @@ app.post("/api/sessions/:session_id/status", (req, res) => {
       return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
     }
 
-    // Check if session exists in chunks
-    const chunk = db.prepare("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1").get(session_id);
-    if (!chunk) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-
+    // Upsert status - don't require session to exist yet (handles race condition with upload)
     upsertSessionStatus.run(session_id, status, Date.now());
     console.log(`🏷️  Session status updated: ${session_id} -> ${status}`);
     res.json({ success: true, session_id, status });
