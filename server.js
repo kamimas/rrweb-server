@@ -288,8 +288,8 @@ const s3 = new AWS.S3();
 // CAMPAIGN ENDPOINTS
 // =====================================================
 
-// Create campaign
-app.post("/api/campaigns", (req, res) => {
+// Create campaign (auth required)
+app.post("/api/campaigns", authenticateJWT, (req, res) => {
   try {
     const { name } = req.body;
     if (!name || typeof name !== "string" || name.trim().length === 0) {
@@ -366,8 +366,8 @@ app.get("/api/campaigns/:id", (req, res) => {
   }
 });
 
-// Update campaign
-app.put("/api/campaigns/:id", (req, res) => {
+// Update campaign (auth required)
+app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
@@ -398,8 +398,8 @@ app.put("/api/campaigns/:id", (req, res) => {
   }
 });
 
-// Delete campaign (and all sessions)
-app.delete("/api/campaigns/:id", (req, res) => {
+// Delete campaign (auth required)
+app.delete("/api/campaigns/:id", authenticateJWT, (req, res) => {
   try {
     const { id } = req.params;
     const campaign = getCampaignById.get(id);
@@ -431,6 +431,54 @@ app.delete("/api/campaigns/:id", (req, res) => {
 // =====================================================
 // SESSION ENDPOINTS
 // =====================================================
+
+// Search sessions by email (MUST be before :session_id route)
+app.get("/api/sessions/search", (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email query parameter required" });
+    }
+
+    const query = `
+      SELECT
+        sc.session_id,
+        sc.distinct_id,
+        sc.campaign_id,
+        c.name as campaign_name,
+        s.status,
+        s.watched,
+        s.watched_at,
+        MIN(sc.timestamp) as first_timestamp,
+        MAX(sc.timestamp) as last_timestamp,
+        (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
+        COUNT(sc.id) as chunk_count
+      FROM session_chunks sc
+      LEFT JOIN campaigns c ON sc.campaign_id = c.id
+      LEFT JOIN sessions s ON sc.session_id = s.session_id
+      JOIN aliases a ON sc.distinct_id = a.distinct_id
+      JOIN users u ON a.user_id = u.id
+      WHERE u.email LIKE ?
+      GROUP BY sc.session_id
+      ORDER BY first_timestamp DESC
+    `;
+
+    const sessions = db.prepare(query).all(`%${email}%`);
+
+    const transformedSessions = sessions.map(session => ({
+      ...session,
+      status: session.status || "dropped_off",
+      watched: session.watched === 1,
+      playback_url: `/api/sessions/${session.session_id}/playback`
+    }));
+
+    res.json({ sessions: transformedSessions });
+  } catch (err) {
+    console.error("Error in GET /api/sessions/search:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // List sessions (by campaign, email, and/or status)
 app.get("/api/sessions", (req, res) => {
@@ -657,8 +705,8 @@ app.get("/api/sessions/:session_id", (req, res) => {
   }
 });
 
-// Delete session
-app.delete("/api/sessions/:session_id", (req, res) => {
+// Delete session (auth required)
+app.delete("/api/sessions/:session_id", authenticateJWT, (req, res) => {
   try {
     const { session_id } = req.params;
 
@@ -692,56 +740,8 @@ app.delete("/api/sessions/:session_id", (req, res) => {
   }
 });
 
-// Search sessions by email
-app.get("/api/sessions/search", (req, res) => {
-  try {
-    const { email } = req.query;
-
-    if (!email) {
-      return res.status(400).json({ error: "Email query parameter required" });
-    }
-
-    const query = `
-      SELECT
-        sc.session_id,
-        sc.distinct_id,
-        sc.campaign_id,
-        c.name as campaign_name,
-        s.status,
-        s.watched,
-        s.watched_at,
-        MIN(sc.timestamp) as first_timestamp,
-        MAX(sc.timestamp) as last_timestamp,
-        (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
-        COUNT(sc.id) as chunk_count
-      FROM session_chunks sc
-      LEFT JOIN campaigns c ON sc.campaign_id = c.id
-      LEFT JOIN sessions s ON sc.session_id = s.session_id
-      JOIN aliases a ON sc.distinct_id = a.distinct_id
-      JOIN users u ON a.user_id = u.id
-      WHERE u.email LIKE ?
-      GROUP BY sc.session_id
-      ORDER BY first_timestamp DESC
-    `;
-
-    const sessions = db.prepare(query).all(`%${email}%`);
-
-    const transformedSessions = sessions.map(session => ({
-      ...session,
-      status: session.status || "dropped_off",
-      watched: session.watched === 1,
-      playback_url: `/api/sessions/${session.session_id}/playback`
-    }));
-
-    res.json({ sessions: transformedSessions });
-  } catch (err) {
-    console.error("Error in GET /api/sessions/search:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Mark session as watched
-app.post("/api/sessions/:session_id/watched", (req, res) => {
+// Mark session as watched (auth required)
+app.post("/api/sessions/:session_id/watched", authenticateJWT, (req, res) => {
   try {
     const { session_id } = req.params;
 

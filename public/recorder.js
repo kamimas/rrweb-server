@@ -316,6 +316,7 @@
             }
           });
           isRecordingActive = true;
+          console.log("🎬 Recorder: Recording started", { sessionId: sessionId, campaign: currentCampaign });
         } catch (err) {
           console.error("Recorder: Error starting recording:", err);
         }
