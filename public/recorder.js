@@ -504,7 +504,12 @@
       return fetch(identifyUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email, distinctId: distinctId }),
+        body: JSON.stringify({
+          email: email,
+          distinctId: distinctId,
+          host: window.location.host,
+          domainToken: DOMAIN_TOKEN
+        }),
         credentials: "include"
       })
         .then(function(res) {
@@ -542,7 +547,11 @@
       return fetch(statusUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: status }),
+        body: JSON.stringify({
+          status: status,
+          host: window.location.host,
+          domainToken: DOMAIN_TOKEN
+        }),
         credentials: "include"
       })
         .then(function(res) {
