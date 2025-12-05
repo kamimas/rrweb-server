@@ -442,6 +442,10 @@
     currentCampaign = null;
     localStorage.removeItem(CAMPAIGN_KEY);
 
+    // Clear session ID - session is now closed
+    localStorage.removeItem(SESSION_ID_KEY);
+    sessionId = null;
+
     log("✅ Recording stopped successfully");
   }
 
