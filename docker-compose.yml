@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # API Server
   rrweb-server:
     build: .
     ports:
@@ -14,6 +15,7 @@ services:
       - ENABLE_CONSOLE_PLUGIN=${ENABLE_CONSOLE_PLUGIN:-true}
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_USERS=${ADMIN_USERS}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       # Persist SQLite database
       - ./data:/app/data
@@ -24,3 +26,19 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+
+  # Background Worker for video rendering
+  rrweb-worker:
+    build: .
+    command: node src/worker.js
+    environment:
+      - AWS_REGION=${AWS_REGION}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - ALLOWED_DOMAINS=${ALLOWED_DOMAINS}
+    volumes:
+      # Same database as API server
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - rrweb-server

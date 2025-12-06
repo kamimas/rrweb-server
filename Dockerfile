@@ -1,8 +1,19 @@
-# Use Node 20 with build tools for better-sqlite3
+# Use Node 20 with build tools for better-sqlite3 and Chromium for video rendering
 FROM node:20-alpine
 
-# Install build dependencies for better-sqlite3
-RUN apk add --no-cache python3 make g++
+# Install build dependencies for better-sqlite3 + Chromium for video rendering
+RUN apk add --no-cache \
+    python3 make g++ \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+# Tell Puppeteer to use installed Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 # Set working directory
 WORKDIR /app
@@ -15,6 +26,8 @@ RUN npm install --omit=dev
 
 # Copy application code
 COPY server.js ./
+COPY timeline-react-aware.js ./
+COPY src ./src/
 COPY public ./public/
 
 # Create data directory for SQLite
