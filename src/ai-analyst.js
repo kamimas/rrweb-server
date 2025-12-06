@@ -203,14 +203,52 @@ Always respond in valid JSON format when analyzing sessions.
 }`;
 
     // Create cache with 1 hour TTL
+    // Note: Gemini requires minimum 1024 tokens for caching, so we pad the initialization
+    const initPrompt = `Initialize Analysis Context for Campaign ${campaignId}.
+
+I need you to analyze user sessions that dropped off before completing the journey.
+For each session, compare it against the Golden Path timeline provided in your instructions.
+Identify the exact step where the user stopped, categorize the reason for dropping off, and provide evidence.
+
+The categories you should use are:
+${rubric.categories.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+Key behavioral signals to watch for:
+${rubric.key_signals}
+
+Please confirm you understand your role and are ready to analyze sessions.`;
+
+    const initResponse = `Analysis context loaded successfully.
+
+I am now acting as a ${rubric.persona}.
+
+My goal: ${rubric.goal}
+
+I have reviewed the Golden Path timeline and understand the expected user journey. I am ready to analyze drop-off sessions using these categories:
+${rubric.categories.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+I will look for these behavioral signals:
+${rubric.key_signals}
+
+For each session you provide, I will output a JSON object with:
+- session_id: The session identifier
+- last_step_name: Where the user stopped
+- progress_percentage: How far they got (0-100)
+- category: One of the categories above
+- evidence: Why I chose this category
+- key_observation: Notable behavior before drop-off
+- comparison_to_golden: How this compares to the success path
+
+Ready to analyze. Please provide the first drop-off session.`;
+
     const cache = await client.caches.create({
         model: MODEL_FAST,
         config: {
             displayName: `analysis-${campaignId}-${Date.now()}`,
             systemInstruction: systemInstruction,
             contents: [
-                { role: "user", parts: [{ text: "Initialize Analysis Context" }] },
-                { role: "model", parts: [{ text: `Analysis context loaded. I am now acting as a ${rubric.persona}. Ready to analyze drop-off sessions using the categories: ${rubric.categories.join(', ')}.` }] }
+                { role: "user", parts: [{ text: initPrompt }] },
+                { role: "model", parts: [{ text: initResponse }] }
             ],
             ttl: "3600s",  // 1 hour
         }
