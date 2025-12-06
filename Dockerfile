@@ -1,7 +1,7 @@
 # Use Node 20 with build tools for better-sqlite3 and Chromium for video rendering
 FROM node:20-alpine
 
-# Install build dependencies for better-sqlite3 + Chromium for video rendering
+# Install build dependencies for better-sqlite3 + Chromium + ffmpeg for video rendering
 RUN apk add --no-cache \
     python3 make g++ \
     chromium \
@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     freetype \
     harfbuzz \
     ca-certificates \
-    ttf-freefont
+    ttf-freefont \
+    ffmpeg
 
 # Tell Puppeteer to use installed Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
