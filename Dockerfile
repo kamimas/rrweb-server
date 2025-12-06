@@ -29,6 +29,7 @@ RUN npm install --omit=dev
 COPY server.js ./
 COPY timeline-react-aware.js ./
 COPY render-worker.js ./
+COPY renderer.html ./
 COPY src ./src/
 COPY public ./public/
 

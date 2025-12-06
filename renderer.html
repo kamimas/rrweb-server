@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden; /* Prevent scrollbars */
+        background-color: white; /* Mandatory for JPEG */
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+    }
+
+    /* We force this to be absolute so it doesn't push layout bounds */
+    #scaler {
+        position: absolute;
+        top: 0;
+        left: 0;
+        transform-origin: 0 0; /* Scale from top-left corner */
+        box-shadow: 0 0 20px rgba(0,0,0,0.1); /* Optional: nice drop shadow */
+    }
+  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.css"/>
+</head>
+<body>
+  <div id="scaler">
+      <div id="replayer"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js"></script>
+  <script>
+    let replayer;
+
+    window.initSession = function(events) {
+      // 1. Get Original Dimensions from Metadata (Type 4)
+      const metaEvent = events.find(e => e.type === 4);
+      const originalWidth = metaEvent ? metaEvent.data.width : 1920;
+      const originalHeight = metaEvent ? metaEvent.data.height : 1080;
+
+      // 2. Initialize Replayer at FULL SIZE
+      replayer = new rrweb.Replayer(events, {
+        root: document.getElementById('replayer'),
+        width: originalWidth,
+        height: originalHeight,
+        unpackFn: rrweb.unpack,
+        mouseTail: false,
+        // Force the replayer to respect our div size
+        showWarning: false,
+      });
+
+      // 3. Calculate Math for "Contain" Fit
+      const targetWidth = window.innerWidth;   // 1280
+      const targetHeight = window.innerHeight; // 720
+
+      const scaleX = targetWidth / originalWidth;
+      const scaleY = targetHeight / originalHeight;
+      const scale = Math.min(scaleX, scaleY); // Fit to smallest dimension
+
+      // 4. Calculate Centering Offsets
+      // We want to move the scaled box to the middle of the screen
+      const renderedWidth = originalWidth * scale;
+      const renderedHeight = originalHeight * scale;
+
+      const xOffset = (targetWidth - renderedWidth) / 2;
+      const yOffset = (targetHeight - renderedHeight) / 2;
+
+      // 5. Apply Transforms
+      const scaler = document.getElementById('scaler');
+      scaler.style.width = originalWidth + 'px';
+      scaler.style.height = originalHeight + 'px';
+
+      // Translate moves it to center, Scale shrinks it
+      scaler.style.transform = `translate(${xOffset}px, ${yOffset}px) scale(${scale})`;
+    };
+
+    window.seekTo = function(timestamp) {
+      if (replayer) {
+        replayer.pause(timestamp);
+      }
+    };
+  </script>
+</body>
+</html>
