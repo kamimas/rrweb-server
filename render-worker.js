@@ -81,15 +81,27 @@ async function renderVideo(inputJsonPath, outputDir) {
     // Render loop with progress logging
     const startTime = performance.now();
     let lastProgressLog = 0;
+    let errorCount = 0;
+    let lastSuccessfulFrame = null;
 
     for (let i = 0; i < totalFrames; i++) {
         const timeOffset = (i / FPS) * 1000;
 
-        // Seek to timestamp
-        await page.evaluate((t) => window.seekTo(t), timeOffset);
+        try {
+            // Seek to timestamp
+            await page.evaluate((t) => window.seekTo(t), timeOffset);
+        } catch (seekError) {
+            // rrweb can fail on navigation boundaries or malformed events
+            // Continue with the last successful frame
+            errorCount++;
+            if (errorCount === 1) {
+                console.log(`[Render] Warning: seek failed at ${(timeOffset/1000).toFixed(1)}s, using previous frame`);
+            }
+        }
 
-        // Capture frame
+        // Capture frame (will capture current state even if seek failed)
         const screenshot = await page.screenshot({ type: 'jpeg', quality: 80 });
+        lastSuccessfulFrame = screenshot;
 
         // Pipe to FFMPEG
         if (!ffmpeg.stdin.write(screenshot)) {
@@ -103,6 +115,10 @@ async function renderVideo(inputJsonPath, outputDir) {
             console.log(`[Render] Progress: ${progress}% (${i}/${totalFrames} frames, ${elapsed}s elapsed)`);
             lastProgressLog = progress;
         }
+    }
+
+    if (errorCount > 0) {
+        console.log(`[Render] Completed with ${errorCount} seek error(s) (frames recovered from previous state)`);
     }
 
     // Finalize

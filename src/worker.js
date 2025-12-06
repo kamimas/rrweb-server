@@ -15,6 +15,7 @@ const AWS = require('aws-sdk');
 
 const queue = require('./queue-manager');
 const s3Helpers = require('./s3-helpers');
+const { compressGaps, analyzeGaps } = require('./compress-gaps');
 const { generateTimeline } = require('../timeline-react-aware');
 const { renderVideo } = require('../render-worker');
 
@@ -62,10 +63,19 @@ async function processSession(sessionId) {
             throw new Error('No events found in session');
         }
 
+        // Analyze and compress gaps in the timeline
+        const gapAnalysis = analyzeGaps(events);
+        if (gapAnalysis.gaps.length > 0) {
+            console.log(`[Worker] Found ${gapAnalysis.gaps.length} gap(s) totaling ${(gapAnalysis.totalGapTime / 1000).toFixed(1)}s`);
+        }
+
+        // Compress gaps before rendering (removes dead time from video)
+        const compressedEvents = compressGaps(events);
+
         // Save events to temp file for render-worker
         const eventsPath = path.join(sessionTempDir, 'events.json');
-        fs.writeFileSync(eventsPath, JSON.stringify(events));
-        console.log(`[Worker] Saved ${events.length} events to temp file`);
+        fs.writeFileSync(eventsPath, JSON.stringify(compressedEvents));
+        console.log(`[Worker] Saved ${compressedEvents.length} events to temp file`);
 
         // 2. Generate Timeline (Text)
         console.log(`[Worker] Generating timeline...`);
