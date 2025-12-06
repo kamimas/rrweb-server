@@ -404,7 +404,14 @@ FORMAT:
 Use markdown formatting. Be specific and actionable.
 Focus on insights that will help the team improve the user experience.
 Reference specific categories and steps from the analysis.
-When providing evidence, link to the relevant session recordings using the session: protocol format.`;
+
+CRITICAL - SESSION LINK FORMAT:
+When referencing sessions, you MUST use the session: protocol (not a URL path).
+✅ CORRECT: [Watch Session](session:sess_abc123) or [Watch Session](session:sess_abc123?t=45)
+❌ WRONG: [Watch Session](/session/sess_abc123) - DO NOT use slashes
+❌ WRONG: [Watch Session](https://example.com/session/sess_abc123) - DO NOT use URLs
+The format is: session:{session_id} or session:{session_id}?t={seconds}
+Use the exact session_id values from the DATA section above.`;
 
     const result = await client.models.generateContent({
         model: MODEL_SMART,
