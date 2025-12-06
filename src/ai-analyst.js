@@ -397,13 +397,14 @@ Generate a strategic report for the team. Include:
 1. **Executive Summary** - One paragraph overview of the drop-off patterns
 2. **The Killer Step** - Identify which step/screen causes the most drop-offs
 3. **Category Breakdown** - Show the distribution across the categories above with percentages
-4. **Pattern Analysis** - Any patterns in behavior, timing, or specific friction points
+4. **Pattern Analysis** - Any patterns in behavior, timing, or specific friction points. When citing specific evidence, use Markdown links to reference sessions. The link text can be anything natural (e.g., "Session A", "Watch Evidence", "this user"), but the URL must follow this exact format: session:{session_id}?t={timestamp} where timestamp is in seconds. Example: [Watch this user hesitate](session:sess_abc123?t=45)
 5. **Actionable Recommendations** - 3-5 specific changes to reduce drop-offs, prioritized by impact
 
 FORMAT:
 Use markdown formatting. Be specific and actionable.
 Focus on insights that will help the team improve the user experience.
-Reference specific categories and steps from the analysis.`;
+Reference specific categories and steps from the analysis.
+When providing evidence, link to the relevant session recordings using the session: protocol format.`;
 
     const result = await client.models.generateContent({
         model: MODEL_SMART,
