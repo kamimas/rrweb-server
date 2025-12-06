@@ -17,6 +17,9 @@ session.json
 session*.json
 public/sessions/
 
+# Temp files (video processing)
+temp/
+
 # Logs
 logs/
 *.log

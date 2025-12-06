@@ -1232,9 +1232,13 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
       });
     }
 
-    // Find ALL drop-off sessions with ready assets
+    // Find ALL drop-off sessions with ready assets (include bucket per session)
     const dropOffSessions = db.prepare(`
-      SELECT DISTINCT s.session_id, s.timeline_s3_key, s.video_s3_key
+      SELECT DISTINCT
+        s.session_id,
+        s.timeline_s3_key,
+        s.video_s3_key,
+        sc.s3_bucket as bucket
       FROM sessions s
       JOIN session_chunks sc ON s.session_id = sc.session_id
       WHERE sc.campaign_id = ?
@@ -1269,42 +1273,94 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
         const goldenData = await s3Helpers.fetchMergedSession(goldenSession.session_id, db, s3);
         const goldenTimelineText = generateTimeline(goldenData.events);
 
-        // Step 2: Prepare drop-off sessions (fetch timelines from S3)
-        const preparedSessions = [];
-        for (const session of dropOffSessions) {
+        // Step 2: Generate custom rubric from mission brief + golden path
+        console.log(`[AI] Generating custom analysis rubric...`);
+        const rubric = await aiAnalyst.generateCustomRubric(campaign.mission_brief, goldenTimelineText);
+
+        // Step 3: Build context cache with the rubric
+        console.log(`[AI] Building context cache with persona: ${rubric.persona}`);
+        const cacheName = await aiAnalyst.buildRubricCache(rubric, goldenTimelineText, campaignId);
+
+        // Step 4: Sequential analysis - download video, analyze, cleanup for each session
+        const analyses = [];
+        const fs = require('fs');
+        const tempDir = path.join(__dirname, 'temp');
+
+        // Ensure temp directory exists
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true });
+        }
+
+        for (let i = 0; i < dropOffSessions.length; i++) {
+          const session = dropOffSessions[i];
+
+          // Validate: Ensure assets actually exist in the DB record
+          if (!session.video_s3_key || !session.timeline_s3_key || !session.bucket) {
+            console.warn(`[AI] Skipping ${session.session_id}: Missing S3 keys or bucket`);
+            continue;
+          }
+
+          const tempVideoPath = path.join(tempDir, `${session.session_id}.mp4`);
+
           try {
-            // Fetch timeline from S3
+            console.log(`[AI] Processing ${session.session_id} [${i + 1}/${dropOffSessions.length}]`);
+
+            // A. Download timeline (text, keep in memory)
             const timelineResponse = await s3.getObject({
-              Bucket: goldenData.bucket,
+              Bucket: session.bucket,
               Key: session.timeline_s3_key
             }).promise();
             const timelineText = timelineResponse.Body.toString('utf8');
 
-            preparedSessions.push({
-              sessionId: session.session_id,
-              timelineText: timelineText
-              // Note: Video analysis optional - can add videoPath if downloaded locally
-            });
+            // B. Download video (binary, write to disk)
+            console.log(`[AI] Downloading video for ${session.session_id}...`);
+            const videoResponse = await s3.getObject({
+              Bucket: session.bucket,
+              Key: session.video_s3_key
+            }).promise();
+            fs.writeFileSync(tempVideoPath, videoResponse.Body);
+
+            // C. Run AI analysis with video
+            const result = await aiAnalyst.analyzeDropOff(
+              session.session_id,
+              cacheName,
+              timelineText,
+              rubric,
+              tempVideoPath
+            );
+
+            analyses.push(result);
+
           } catch (err) {
-            console.error(`[AI] Error preparing session ${session.session_id}:`, err.message);
+            console.error(`[AI] Failed to analyze ${session.session_id}:`, err.message);
+            analyses.push({
+              session_id: session.session_id,
+              error: err.message
+            });
+          } finally {
+            // D. Immediate cleanup - delete video before next iteration
+            if (fs.existsSync(tempVideoPath)) {
+              fs.unlinkSync(tempVideoPath);
+              console.log(`[AI] Cleaned up temp video: ${session.session_id}`);
+            }
           }
         }
 
-        if (preparedSessions.length === 0) {
-          throw new Error('No sessions could be prepared for analysis');
+        if (analyses.length === 0) {
+          throw new Error('No sessions could be analyzed');
         }
 
-        // Step 3: Run full AI analysis with dynamic rubric generation
-        const { rubric, analyses, report } = await aiAnalyst.runCampaignAnalysis(
+        // Step 5: Generate campaign report
+        console.log(`[AI] Generating campaign report...`);
+        const report = await aiAnalyst.generateCampaignReport(
           campaignId,
           campaign.name,
           campaign.mission_brief,
-          goldenTimelineText,
-          preparedSessions,
-          (stage, message) => console.log(`[AI] ${stage}: ${message}`)
+          analyses,
+          rubric
         );
 
-        // Step 4: Save per-session AI diagnoses
+        // Step 6: Save per-session AI diagnoses
         const updateSessionDiagnosis = db.prepare(`
           UPDATE sessions
           SET ai_diagnosis = ?, ai_evidence = ?, ai_last_step = ?, ai_progress = ?
@@ -1324,7 +1380,7 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
           }
         }
 
-        // Step 5: Save report and generated rubric to database
+        // Step 7: Save report and generated rubric to database
         db.prepare(`
           UPDATE campaigns
           SET ai_report = ?, generated_rubric = ?, ai_analysis_status = 'complete'

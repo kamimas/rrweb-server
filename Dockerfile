@@ -33,8 +33,8 @@ COPY renderer.html ./
 COPY src ./src/
 COPY public ./public/
 
-# Create data directory for SQLite
-RUN mkdir -p /app/data
+# Create data directory for SQLite and temp directory for video processing
+RUN mkdir -p /app/data /app/temp
 
 # Set environment variables
 ENV NODE_ENV=production
