@@ -87,35 +87,35 @@ async function generateCustomRubric(missionBrief, goldenTimeline) {
 
     const prompt = `You are a Lead Product Analyst specializing in user behavior analysis.
 
-CONTEXT FROM ADMIN:
-${missionBrief}
+            CONTEXT FROM ADMIN:
+            ${missionBrief}
 
-SUCCESSFUL USER JOURNEY (Golden Path):
-${goldenTimeline}
+            SUCCESSFUL USER JOURNEY (Golden Path):
+            ${goldenTimeline}
 
-TASK:
-Based on the admin's description and the actual success path above, create a custom JSON configuration for analyzing drop-off sessions for THIS specific campaign.
+            TASK:
+            Based on the admin's description and the actual success path above, create a custom JSON configuration for analyzing drop-off sessions for THIS specific campaign.
 
-Your output must include:
-1. "persona" - An appropriate AI analyst persona for this specific funnel (e.g., "Pedagogical Expert", "CRO Specialist", "Luxury Retail UX Expert")
-2. "goal" - A one-sentence goal for the analysis
-3. "categories" - Exactly 4-5 specific failure categories relevant to THIS funnel (not generic ones)
-4. "key_signals" - Specific behavioral signals to look for in the timeline
+            Your output must include:
+            1. "persona" - An appropriate AI analyst persona for this specific funnel (e.g., "Pedagogical Expert", "CRO Specialist", "Luxury Retail UX Expert")
+            2. "goal" - A one-sentence goal for the analysis
+            3. "categories" - Exactly 4-5 specific failure categories relevant to THIS funnel (not generic ones)
+            4. "key_signals" - Specific behavioral signals to look for in the timeline
 
-IMPORTANT: The categories should be specific to the funnel described, not generic UX categories.
+            IMPORTANT: The categories should be specific to the funnel described, not generic UX categories.
 
-Examples of good category specificity:
-- For a calculus quiz: "Concept Confusion (Derivatives)", "Calculation Error", "Equation Input Frustration"
-- For luxury checkout: "Sticker Shock (Price Sensitivity)", "Trust Friction (Payment Security)", "Shipping Cost Surprise"
-- For employee tool: "Workflow Inefficiency", "Navigation Confusion", "Feature Discovery Failure"
+            Examples of good category specificity:
+            - For a calculus quiz: "Concept Confusion (Derivatives)", "Calculation Error", "Equation Input Frustration"
+            - For luxury checkout: "Sticker Shock (Price Sensitivity)", "Trust Friction (Payment Security)", "Shipping Cost Surprise"
+            - For employee tool: "Workflow Inefficiency", "Navigation Confusion", "Feature Discovery Failure"
 
-OUTPUT JSON ONLY (no markdown, no explanation):
-{
-    "persona": "...",
-    "goal": "...",
-    "categories": ["Category 1", "Category 2", "Category 3", "Category 4"],
-    "key_signals": "..."
-}`;
+            OUTPUT JSON ONLY (no markdown, no explanation):
+            {
+                "persona": "...",
+                "goal": "...",
+                "categories": ["Category 1", "Category 2", "Category 3", "Category 4"],
+                "key_signals": "..."
+            }`;
 
     const result = await client.models.generateContent({
         model: MODEL_SMART,

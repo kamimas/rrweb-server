@@ -208,6 +208,22 @@ try {
   // Column already exists, ignore
 }
 
+// Migration: Add funnel_config column to campaigns for step-based tracking
+try {
+  db.exec(`ALTER TABLE campaigns ADD COLUMN funnel_config TEXT`);
+  console.log("✅ Migration: Added funnel_config column to campaigns");
+} catch (e) {
+  // Column already exists, ignore
+}
+
+// Migration: Add furthest_step_index column to sessions for funnel progress tracking
+try {
+  db.exec(`ALTER TABLE sessions ADD COLUMN furthest_step_index INTEGER DEFAULT -1`);
+  console.log("✅ Migration: Added furthest_step_index column to sessions");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 console.log("✅ SQLite database initialized at:", dbPath);
 
 // Prepare statements for better performance
@@ -506,10 +522,10 @@ app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
 app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
   try {
     const { id } = req.params;
-    const { name, mission_brief } = req.body;
+    const { name, mission_brief, funnel_config } = req.body;
 
     const campaign = db.prepare(`
-      SELECT id, name, created_at, mission_brief FROM campaigns WHERE id = ?
+      SELECT id, name, created_at, mission_brief, funnel_config FROM campaigns WHERE id = ?
     `).get(id);
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
@@ -532,16 +548,24 @@ app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
       newMissionBrief = mission_brief || null;
     }
 
+    // Handle funnel_config update
+    // Format: [{ name: "Landing", key: "view_home" }, ...]
+    let newFunnelConfig = campaign.funnel_config;
+    if (funnel_config !== undefined) {
+      newFunnelConfig = funnel_config ? JSON.stringify(funnel_config) : null;
+    }
+
     db.prepare(`
-      UPDATE campaigns SET name = ?, mission_brief = ? WHERE id = ?
-    `).run(trimmedName, newMissionBrief, id);
+      UPDATE campaigns SET name = ?, mission_brief = ?, funnel_config = ? WHERE id = ?
+    `).run(trimmedName, newMissionBrief, newFunnelConfig, id);
 
     console.log(`📝 Campaign updated: ${campaign.name} -> ${trimmedName}`);
     res.json({
       id: parseInt(id),
       name: trimmedName,
       created_at: campaign.created_at,
-      mission_brief: newMissionBrief
+      mission_brief: newMissionBrief,
+      funnel_config: newFunnelConfig ? JSON.parse(newFunnelConfig) : null
     });
   } catch (err) {
     console.error("Error in PUT /api/campaigns/:id:", err);
@@ -993,6 +1017,70 @@ app.post("/api/sessions/:session_id/status", validateDomainToken, (req, res) => 
     res.json({ success: true, session_id, status, assets_status: assetsStatus });
   } catch (err) {
     console.error("Error in POST /api/sessions/:session_id/status:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Track funnel checkpoint (domain token required)
+// Called by frontend SDK when user reaches a funnel step
+app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, (req, res) => {
+  try {
+    const { session_id } = req.params;
+    const { key } = req.body;
+
+    if (!key) {
+      return res.sendStatus(200); // Silently ignore missing key
+    }
+
+    // 1. Find campaign via first chunk (efficient)
+    const chunk = db.prepare(`
+      SELECT campaign_id FROM session_chunks
+      WHERE session_id = ?
+      LIMIT 1
+    `).get(session_id);
+
+    if (!chunk) {
+      return res.sendStatus(404);
+    }
+
+    // 2. Get funnel config from campaign
+    const campaign = db.prepare(`
+      SELECT funnel_config FROM campaigns WHERE id = ?
+    `).get(chunk.campaign_id);
+
+    if (!campaign || !campaign.funnel_config) {
+      return res.sendStatus(200); // No funnel configured, silently accept
+    }
+
+    // 3. Parse config and find step index
+    const config = JSON.parse(campaign.funnel_config);
+    const stepIndex = config.findIndex(step => step.key === key);
+
+    if (stepIndex === -1) {
+      return res.sendStatus(200); // Unknown key, silently accept
+    }
+
+    // 4. Get current progress (handle missing session row)
+    const session = db.prepare(`
+      SELECT furthest_step_index FROM sessions WHERE session_id = ?
+    `).get(session_id);
+    const currentIndex = session?.furthest_step_index ?? -1;
+
+    // 5. Update only if advancing deeper into funnel ("high score" rule)
+    if (stepIndex > currentIndex) {
+      db.prepare(`
+        INSERT INTO sessions (session_id, furthest_step_index)
+        VALUES (?, ?)
+        ON CONFLICT(session_id) DO UPDATE
+        SET furthest_step_index = excluded.furthest_step_index
+      `).run(session_id, stepIndex);
+
+      console.log(`📍 Checkpoint: ${session_id} advanced to step ${stepIndex} (${config[stepIndex].name})`);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Error in POST /api/sessions/:session_id/checkpoint:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
