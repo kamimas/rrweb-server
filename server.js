@@ -483,7 +483,7 @@ app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
   try {
     const { id } = req.params;
     const campaign = db.prepare(`
-      SELECT id, name, created_at, mission_brief, generated_rubric, ai_report, ai_analysis_status
+      SELECT id, name, created_at, mission_brief, funnel_config, generated_rubric, ai_report, ai_analysis_status
       FROM campaigns WHERE id = ?
     `).get(id);
 
@@ -507,6 +507,7 @@ app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
 
     res.json({
       ...campaign,
+      funnel_config: campaign.funnel_config ? JSON.parse(campaign.funnel_config) : null,
       generated_rubric: campaign.generated_rubric ? JSON.parse(campaign.generated_rubric) : null,
       session_count: sessionCount?.count || 0,
       completed_count: completedCount?.count || 0,
