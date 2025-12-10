@@ -576,6 +576,40 @@
         });
     };
 
+    window.recorder.checkpoint = function(key) {
+      log("📍 checkpoint() called with: " + key);
+      if (!key || typeof key !== "string") {
+        logError("Invalid key. Must be a non-empty string.");
+        return;
+      }
+      if (!sessionId) {
+        logWarn("No active session for checkpoint. Ignoring.");
+        return;
+      }
+      var checkpointUrl = window.RRWEB_SERVER_URL
+        ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/sessions/" + sessionId + "/checkpoint")
+        : "http://localhost:3000/api/sessions/" + sessionId + "/checkpoint";
+      // Fire-and-forget - don't block on response
+      fetch(checkpointUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: key,
+          host: window.location.host,
+          domainToken: DOMAIN_TOKEN
+        }),
+        credentials: "include"
+      })
+        .then(function(res) {
+          if (res.ok) {
+            log("📍 Checkpoint sent: " + key);
+          }
+        })
+        .catch(function(err) {
+          logWarn("Failed to send checkpoint: " + err.message);
+        });
+    };
+
     window.recorder.getSessionId = function() {
       return sessionId;
     };
@@ -605,7 +639,7 @@
     });
 
     log("✅ Recorder initialized successfully");
-    log("📖 Available methods: recorder.startRecording(), recorder.stopRecording(), recorder.identify(), recorder.setStatus(), recorder.isRecording(), recorder.getSessionId()");
+    log("📖 Available methods: recorder.startRecording(), recorder.stopRecording(), recorder.identify(), recorder.setStatus(), recorder.checkpoint(), recorder.isRecording(), recorder.getSessionId()");
   }
 
   init();
