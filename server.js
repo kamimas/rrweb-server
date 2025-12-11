@@ -680,11 +680,13 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
         sc.distinct_id,
         sc.campaign_id,
         c.name as campaign_name,
+        c.funnel_config,
         s.status,
         s.watched,
         s.watched_at,
         s.assets_status,
         s.ai_diagnosis,
+        s.furthest_step_index,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
         (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
@@ -748,12 +750,27 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
         WHERE a.distinct_id = ?
       `).get(session.distinct_id);
 
+      // Resolve furthest_step_index to key string
+      let furthest_step_key = null;
+      if (session.funnel_config && session.furthest_step_index >= 0) {
+        try {
+          const funnelSteps = JSON.parse(session.funnel_config);
+          furthest_step_key = funnelSteps[session.furthest_step_index]?.key || null;
+        } catch (e) {
+          // Invalid JSON, leave as null
+        }
+      }
+
+      // Exclude funnel_config from response (internal detail)
+      const { funnel_config, ...sessionData } = session;
+
       return {
-        ...session,
+        ...sessionData,
         status: session.status || "dropped_off",
         watched: session.watched === 1,
         email: emailResult?.email || null,
-        playback_url: `/api/sessions/${session.session_id}/playback`
+        playback_url: `/api/sessions/${session.session_id}/playback`,
+        furthest_step_key
       };
     });
 
@@ -873,6 +890,7 @@ app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
         sc.distinct_id,
         sc.campaign_id,
         c.name as campaign_name,
+        c.funnel_config,
         s.status,
         s.watched,
         s.watched_at,
@@ -881,6 +899,7 @@ app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
         s.ai_evidence,
         s.ai_last_step,
         s.ai_progress,
+        s.furthest_step_index,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
         (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
@@ -906,13 +925,28 @@ app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
     `;
     const emailResult = db.prepare(emailQuery).get(session.distinct_id);
 
+    // Resolve furthest_step_index to key string
+    let furthest_step_key = null;
+    if (session.funnel_config && session.furthest_step_index >= 0) {
+      try {
+        const funnelSteps = JSON.parse(session.funnel_config);
+        furthest_step_key = funnelSteps[session.furthest_step_index]?.key || null;
+      } catch (e) {
+        // Invalid JSON, leave as null
+      }
+    }
+
+    // Exclude funnel_config from response (internal detail)
+    const { funnel_config, ...sessionData } = session;
+
     res.json({
-      ...session,
+      ...sessionData,
       email: emailResult?.email || null,
       status: session.status || "dropped_off",
       assets_status: session.assets_status || "raw",
       watched: session.watched === 1,
-      playback_url: `/api/sessions/${session.session_id}/playback`
+      playback_url: `/api/sessions/${session.session_id}/playback`,
+      furthest_step_key
     });
   } catch (err) {
     console.error("Error in GET /api/sessions/:session_id:", err);

@@ -21,7 +21,6 @@ docs/
 LICENSE
 
 # Development files
-src/
 *.log
 
 # OS files
