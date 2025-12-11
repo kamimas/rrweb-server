@@ -436,7 +436,7 @@ const s3 = new AWS.S3();
 // Create campaign (auth required)
 app.post("/api/campaigns", authenticateJWT, (req, res) => {
   try {
-    const { name, mission_brief } = req.body;
+    const { name, mission_brief, funnel_config } = req.body;
     if (!name || typeof name !== "string" || name.trim().length === 0) {
       return res.status(400).json({ error: "Missing or invalid campaign name" });
     }
@@ -449,17 +449,21 @@ app.post("/api/campaigns", authenticateJWT, (req, res) => {
       return res.status(409).json({ error: "Campaign name already exists" });
     }
 
+    // Stringify funnel_config if provided
+    const funnelConfigStr = funnel_config ? JSON.stringify(funnel_config) : null;
+
     const createdAt = Date.now();
     const result = db.prepare(`
-      INSERT INTO campaigns (name, created_at, mission_brief) VALUES (?, ?, ?)
-    `).run(trimmedName, createdAt, mission_brief || null);
+      INSERT INTO campaigns (name, created_at, mission_brief, funnel_config) VALUES (?, ?, ?, ?)
+    `).run(trimmedName, createdAt, mission_brief || null, funnelConfigStr);
 
     console.log(`📋 Campaign created: ${trimmedName}`);
     res.status(201).json({
       id: result.lastInsertRowid,
       name: trimmedName,
       created_at: createdAt,
-      mission_brief: mission_brief || null
+      mission_brief: mission_brief || null,
+      funnel_config: funnel_config || null
     });
   } catch (err) {
     console.error("Error in POST /api/campaigns:", err);
