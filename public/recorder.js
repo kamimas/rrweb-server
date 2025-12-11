@@ -403,6 +403,12 @@
           log("🎬 Distinct ID: " + distinctId);
           log("🎬 Page: " + window.location.href);
           log("🎬 ========================================");
+
+          // Immediate flush to register session on server (fixes checkpoint 404 race condition)
+          setTimeout(function() {
+            log("📤 Initial flush to register session on server...");
+            sendEvents();
+          }, 500);
         } catch (err) {
           logError("Error starting rrweb recording: " + err.message);
         }
