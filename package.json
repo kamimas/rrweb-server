@@ -1,6 +1,6 @@
 {
   "name": "rrweb-session-capture",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A production-grade Node.js application for capturing rrweb sessions with enhanced plugins and multi-domain support.",
   "main": "server.js",
   "scripts": {
