@@ -96,12 +96,24 @@ db.exec(`
     updated_at INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS campaign_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL,
+    selector TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    step_key TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+  );
+
   CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
   CREATE INDEX IF NOT EXISTS idx_session_chunks_distinct_id ON session_chunks(distinct_id);
   CREATE INDEX IF NOT EXISTS idx_session_chunks_campaign_id ON session_chunks(campaign_id);
   CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
   CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
+  CREATE INDEX IF NOT EXISTS idx_campaign_rules_campaign_id ON campaign_rules(campaign_id);
 `);
 
 // Migration: Add s3_bucket column if it doesn't exist (for existing databases)
@@ -294,6 +306,17 @@ const app = express();
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
+  // Public API routes (autopilot) - allow any origin
+  if (req.path.startsWith('/api/projects/')) {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    return next();
+  }
+
   // Allow requests from allowed domains
   if (origin && allowedDomains[origin.replace(/^https?:\/\//, '')]) {
     res.header('Access-Control-Allow-Origin', origin);
@@ -342,6 +365,121 @@ app.get("/config", (req, res) => {
   res.json({
     enableConsolePlugin: process.env.ENABLE_CONSOLE_PLUGIN === "true"
   });
+});
+
+// ----- Autopilot Config Endpoint (for SDK manifest) -----
+// CORS preflight for this route
+app.options("/api/projects/:token/config", (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.get("/api/projects/:token/config", (req, res) => {
+  // CORS: Allow any origin since SDK runs on client websites
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const { token } = req.params;
+
+  // Validate token against any configured domain
+  const isValidToken = Object.values(allowedDomains).some(d => d.token === token);
+  if (!isValidToken) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
+  try {
+    // Get all rules joined with campaign names
+    const rules = db.prepare(`
+      SELECT
+        cr.trigger_type,
+        cr.selector,
+        cr.action_type,
+        c.name as campaign_name,
+        cr.step_key
+      FROM campaign_rules cr
+      JOIN campaigns c ON cr.campaign_id = c.id
+      ORDER BY c.id, cr.id
+    `).all();
+
+    res.json({ rules });
+  } catch (err) {
+    console.error("Error in GET /api/projects/:token/config:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ----- Save Rule Endpoint (for Visual Editor) -----
+// CORS preflight
+app.options("/api/projects/:token/rules", (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.post("/api/projects/:token/rules", (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const { token } = req.params;
+
+  // Validate token
+  const isValidToken = Object.values(allowedDomains).some(d => d.token === token);
+  if (!isValidToken) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
+  try {
+    const { campaign_id, trigger_type, selector, action_type, step_key } = req.body;
+
+    // Validate required fields
+    if (!campaign_id || !trigger_type || !selector || !action_type) {
+      return res.status(400).json({ error: "Missing required fields: campaign_id, trigger_type, selector, action_type" });
+    }
+
+    // Validate trigger_type
+    const validTriggers = ["CLICK_ELEMENT", "URL_CONTAINS"];
+    if (!validTriggers.includes(trigger_type)) {
+      return res.status(400).json({ error: "Invalid trigger_type. Must be: " + validTriggers.join(", ") });
+    }
+
+    // Validate action_type
+    const validActions = ["START_RECORDING", "STOP_RECORDING", "LOG_STEP"];
+    if (!validActions.includes(action_type)) {
+      return res.status(400).json({ error: "Invalid action_type. Must be: " + validActions.join(", ") });
+    }
+
+    // Validate step_key is provided for LOG_STEP
+    if (action_type === "LOG_STEP" && !step_key) {
+      return res.status(400).json({ error: "step_key is required when action_type is LOG_STEP" });
+    }
+
+    // Verify campaign exists
+    const campaign = db.prepare("SELECT id FROM campaigns WHERE id = ?").get(campaign_id);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    // Insert rule
+    const result = db.prepare(`
+      INSERT INTO campaign_rules (campaign_id, trigger_type, selector, action_type, step_key, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(campaign_id, trigger_type, selector, action_type, step_key || null, Date.now());
+
+    console.log(`🤖 Rule created: ${action_type} on ${selector} for campaign ${campaign_id}`);
+
+    res.status(201).json({
+      id: result.lastInsertRowid,
+      campaign_id,
+      trigger_type,
+      selector,
+      action_type,
+      step_key: step_key || null
+    });
+  } catch (err) {
+    console.error("Error in POST /api/projects/:token/rules:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // ----- JWT Middleware -----

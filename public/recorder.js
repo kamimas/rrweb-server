@@ -36,6 +36,43 @@
   }
   log("Domain token found: " + DOMAIN_TOKEN.substring(0, 10) + "...");
 
+  // Check for Editor Mode
+  var urlParams = new URLSearchParams(window.location.search);
+  var isEditorMode = urlParams.get("__editor_mode") === "true";
+  var editorToken = urlParams.get("token");
+  var campaignId = urlParams.get("campaign_id");
+
+  if (isEditorMode) {
+    log("🎨 Editor Mode Detected");
+
+    // Security: Verify token matches
+    if (editorToken !== DOMAIN_TOKEN) {
+      logWarn("Editor token mismatch. Ignoring editor mode.");
+    } else {
+      // Pass campaign_id to overlay via global
+      window.__RRWEB_CAMPAIGN_ID = campaignId;
+      window.__RRWEB_DOMAIN_TOKEN = DOMAIN_TOKEN;
+
+      var editorUrl = window.RRWEB_SERVER_URL
+        ? window.RRWEB_SERVER_URL.replace("/upload-session", "/editor-overlay.js")
+        : "http://localhost:3000/editor-overlay.js";
+
+      log("🎨 Loading overlay from: " + editorUrl);
+
+      var editorScript = document.createElement("script");
+      editorScript.src = editorUrl;
+      editorScript.onload = function() {
+        log("🎨 Visual editor loaded successfully");
+      };
+      editorScript.onerror = function() {
+        logError("Failed to load visual editor");
+      };
+      document.head.appendChild(editorScript);
+
+      return; // Don't initialize recorder in editor mode
+    }
+  }
+
   // Storage keys
   var DISTINCT_ID_KEY = "rrweb_distinct_id";
   var SESSION_ID_KEY = "rrweb_session_id";
@@ -489,6 +526,82 @@
     });
   }
 
+  // ------------------------------------------------------
+  // Autopilot Logic (The Brain)
+  // ------------------------------------------------------
+
+  function runAutopilot(rules) {
+    if (!rules || rules.length === 0) return;
+    log("🤖 Autopilot engaged with " + rules.length + " rules");
+
+    // Helper: Execute the action defined in the DB
+    function executeRule(rule) {
+      log("🤖 Rule Triggered: " + rule.action_type + " on " + rule.selector);
+
+      if (rule.action_type === "START_RECORDING") {
+        // Only start if we have a campaign name
+        if (rule.campaign_name) {
+          window.recorder.startRecording({ campaign: rule.campaign_name });
+        } else {
+          logWarn("🤖 Cannot start recording: Rule missing campaign_name");
+        }
+      }
+      else if (rule.action_type === "STOP_RECORDING") {
+        window.recorder.stopRecording();
+      }
+      else if (rule.action_type === "LOG_STEP") {
+        if (rule.step_key) {
+          window.recorder.checkpoint(rule.step_key);
+        }
+      }
+    }
+
+    // 1. URL Monitor (Checks on Load + History Changes)
+    function checkUrlRules() {
+      var currentPath = window.location.pathname;
+      rules.forEach(function(rule) {
+        if (rule.trigger_type === "URL_CONTAINS") {
+          // specific check: /pricing matches /pricing/details?id=1
+          if (currentPath.indexOf(rule.selector) !== -1) {
+             // Avoid re-triggering 'START' if already recording same campaign
+             if (rule.action_type === "START_RECORDING" &&
+                 window.recorder.isRecording() &&
+                 window.recorder.getCampaign() === rule.campaign_name) {
+               return;
+             }
+             executeRule(rule);
+          }
+        }
+      });
+    }
+
+    // Monkey-patch History API to detect SPA navigation
+    var originalPushState = history.pushState;
+    history.pushState = function() {
+      originalPushState.apply(this, arguments);
+      setTimeout(checkUrlRules, 50); // Small delay to let URL update
+    };
+    window.addEventListener("popstate", checkUrlRules);
+    checkUrlRules(); // Run immediately on load
+
+    // 2. Click Monitor (Global Listener)
+    document.addEventListener("click", function(e) {
+      // We loop through 'CLICK_ELEMENT' rules
+      rules.forEach(function(rule) {
+        if (rule.trigger_type === "CLICK_ELEMENT") {
+          // Matches: Does the clicked element (or its parent) match the CSS selector?
+          try {
+            if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
+              executeRule(rule);
+            }
+          } catch (err) {
+            // Ignore invalid selector errors
+          }
+        }
+      });
+    }, true); // Capture phase (run before other scripts)
+  }
+
   // Initialize the recorder
   function init() {
     distinctId = getOrCreateDistinctId();
@@ -620,14 +733,34 @@
       return sessionId;
     };
 
-    // Check if in manual mode
-    var config = window.RRWEB_CONFIG || {};
-    var manualMode = config.manualMode === true;
+    // Fetch Autopilot Config
+    var configUrl = window.RRWEB_SERVER_URL
+        ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/projects/" + DOMAIN_TOKEN + "/config")
+        : "http://localhost:3000/api/projects/" + DOMAIN_TOKEN + "/config";
 
-    if (!manualMode) {
-      // Try to resume if there was an active recording
-      tryResumeRecording();
-    }
+    log("🤖 Fetching Autopilot config...");
+
+    fetch(configUrl)
+      .then(function(res) {
+        if (res.ok) return res.json();
+        throw new Error("Config fetch failed");
+      })
+      .then(function(data) {
+        // 1. Run Autopilot if rules exist
+        if (data.rules && Array.isArray(data.rules)) {
+          runAutopilot(data.rules);
+        }
+
+        // 2. Resume Manual Session (if needed)
+        // Only resume if Autopilot didn't just start a new one
+        if (!window.recorder.isRecording()) {
+          tryResumeRecording();
+        }
+      })
+      .catch(function(err) {
+        logWarn("🤖 Autopilot disabled (Config fetch failed or offline). Falling back to manual mode.");
+        tryResumeRecording();
+      });
 
     // Periodic send + beforeunload
     setInterval(function() {
