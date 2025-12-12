@@ -589,13 +589,59 @@
       // We loop through 'CLICK_ELEMENT' rules
       rules.forEach(function(rule) {
         if (rule.trigger_type === "CLICK_ELEMENT") {
-          // Matches: Does the clicked element (or its parent) match the CSS selector?
-          try {
-            if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
-              executeRule(rule);
+          var isMatch = false;
+
+          // STRATEGY A: Text Match (Custom Logic)
+          // Handles selectors like: text="Sign Up"
+          if (rule.selector.startsWith('text="') || rule.selector.startsWith("text='")) {
+            var expectedText = rule.selector
+              .replace(/^text=["']/, '')
+              .replace(/["']$/, '')
+              .trim();
+            var clickedText = (e.target.innerText || "").trim();
+            // Check if clicked element contains the expected text
+            if (clickedText === expectedText || clickedText.indexOf(expectedText) !== -1) {
+              isMatch = true;
             }
-          } catch (err) {
-            // Ignore invalid selector errors
+            // Also check parent elements (for spans inside buttons, etc.)
+            if (!isMatch && e.target.parentElement) {
+              var parentText = (e.target.parentElement.innerText || "").trim();
+              if (parentText === expectedText) {
+                isMatch = true;
+              }
+            }
+          }
+          // STRATEGY B: Href Match (Custom Logic)
+          // Handles selectors like: href="/pricing"
+          else if (rule.selector.startsWith('href="') || rule.selector.startsWith("href='")) {
+            var expectedHref = rule.selector
+              .replace(/^href=["']/, '')
+              .replace(/["']$/, '');
+            // Find closest anchor tag
+            var anchor = e.target.closest('a');
+            if (anchor) {
+              var actualHref = anchor.getAttribute('href') || '';
+              // Match if href equals or contains the expected value
+              if (actualHref === expectedHref || actualHref.indexOf(expectedHref) !== -1) {
+                isMatch = true;
+              }
+            }
+          }
+          // STRATEGY C: Standard CSS Selector
+          else {
+            try {
+              if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
+                isMatch = true;
+              }
+            } catch (err) {
+              // Ignore invalid selector errors
+              log("🤖 Invalid selector: " + rule.selector);
+            }
+          }
+
+          // Execute the rule if matched
+          if (isMatch) {
+            executeRule(rule);
           }
         }
       });
