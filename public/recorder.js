@@ -586,56 +586,146 @@
 
     // 2. Click Monitor (Global Listener)
     document.addEventListener("click", function(e) {
+      // Normalization helper: "Climb up" to find the interactive element
+      function normalizeTarget(el) {
+        var interactive = el.closest('a, button, [role="button"], input, select, textarea, [onclick]');
+        return interactive || el;
+      }
+
       // We loop through 'CLICK_ELEMENT' rules
       rules.forEach(function(rule) {
         if (rule.trigger_type === "CLICK_ELEMENT") {
           var isMatch = false;
+          var conditions = null;
 
-          // STRATEGY A: Text Match (Custom Logic)
-          // Handles selectors like: text="Sign Up"
-          if (rule.selector.startsWith('text="') || rule.selector.startsWith("text='")) {
-            var expectedText = rule.selector
-              .replace(/^text=["']/, '')
-              .replace(/["']$/, '')
-              .trim();
-            var clickedText = (e.target.innerText || "").trim();
-            // Check if clicked element contains the expected text
-            if (clickedText === expectedText || clickedText.indexOf(expectedText) !== -1) {
+          // 1. Try to parse JSON (New GTM-style composite rules)
+          try {
+            var parsed = JSON.parse(rule.selector);
+            if (parsed.operator === "AND" && Array.isArray(parsed.conditions)) {
+              conditions = parsed.conditions;
+            }
+          } catch (err) {
+            // Not JSON, fall back to legacy string logic below
+          }
+
+          if (conditions) {
+            // --- GTM STYLE LOGIC ---
+            // "AND" Logic: All conditions must pass
+            var target = normalizeTarget(e.target);
+
+            var allPassed = conditions.every(function(cond) {
+              // A. Check Page Path
+              if (cond.type === 'PAGE_PATH') {
+                if (cond.op === 'contains') {
+                  return window.location.pathname.indexOf(cond.val) !== -1;
+                }
+                return window.location.pathname === cond.val;
+              }
+
+              // B. Check Click Text
+              if (cond.type === 'CLICK_TEXT') {
+                var txt = (target.innerText || target.textContent || "").trim();
+                if (cond.op === 'equals') {
+                  return txt === cond.val;
+                }
+                return txt.indexOf(cond.val) !== -1;
+              }
+
+              // C. Check Click ID
+              if (cond.type === 'CLICK_ID') {
+                var expectedId = cond.val.startsWith('#') ? cond.val : '#' + cond.val;
+                return ('#' + target.id) === expectedId;
+              }
+
+              // D. Check Click Href
+              if (cond.type === 'CLICK_HREF') {
+                var anchor = target.closest('a');
+                if (!anchor) return false;
+                var actualHref = anchor.getAttribute('href') || '';
+                if (cond.op === 'contains') {
+                  return actualHref.indexOf(cond.val) !== -1;
+                }
+                return actualHref === cond.val;
+              }
+
+              // E. Check Click Attribute (data-testid, etc.)
+              if (cond.type === 'CLICK_ATTR') {
+                // val format: [data-testid="value"]
+                var attrMatch = cond.val.match(/\[([^\]=]+)="([^"]+)"\]/);
+                if (attrMatch) {
+                  var attrName = attrMatch[1];
+                  var attrValue = attrMatch[2];
+                  return target.getAttribute(attrName) === attrValue;
+                }
+                return false;
+              }
+
+              // F. Check CSS Selector
+              if (cond.type === 'CLICK_SELECTOR') {
+                try {
+                  return target.matches(cond.val) || e.target.matches(cond.val);
+                } catch (err) {
+                  return false;
+                }
+              }
+
+              return false;
+            });
+
+            if (allPassed) {
               isMatch = true;
+              log("🤖 GTM Rule matched: " + conditions.length + " conditions passed");
             }
-            // Also check parent elements (for spans inside buttons, etc.)
-            if (!isMatch && e.target.parentElement) {
-              var parentText = (e.target.parentElement.innerText || "").trim();
-              if (parentText === expectedText) {
+
+          } else {
+            // --- LEGACY LOGIC (String selectors for backwards compatibility) ---
+
+            // STRATEGY A: Text Match (Custom Logic)
+            // Handles selectors like: text="Sign Up"
+            if (rule.selector.startsWith('text="') || rule.selector.startsWith("text='")) {
+              var expectedText = rule.selector
+                .replace(/^text=["']/, '')
+                .replace(/["']$/, '')
+                .trim();
+              var clickedText = (e.target.innerText || "").trim();
+              // Check if clicked element contains the expected text
+              if (clickedText === expectedText || clickedText.indexOf(expectedText) !== -1) {
                 isMatch = true;
               }
-            }
-          }
-          // STRATEGY B: Href Match (Custom Logic)
-          // Handles selectors like: href="/pricing"
-          else if (rule.selector.startsWith('href="') || rule.selector.startsWith("href='")) {
-            var expectedHref = rule.selector
-              .replace(/^href=["']/, '')
-              .replace(/["']$/, '');
-            // Find closest anchor tag
-            var anchor = e.target.closest('a');
-            if (anchor) {
-              var actualHref = anchor.getAttribute('href') || '';
-              // Match if href equals or contains the expected value
-              if (actualHref === expectedHref || actualHref.indexOf(expectedHref) !== -1) {
-                isMatch = true;
+              // Also check parent elements (for spans inside buttons, etc.)
+              if (!isMatch && e.target.parentElement) {
+                var parentText = (e.target.parentElement.innerText || "").trim();
+                if (parentText === expectedText) {
+                  isMatch = true;
+                }
               }
             }
-          }
-          // STRATEGY C: Standard CSS Selector
-          else {
-            try {
-              if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
-                isMatch = true;
+            // STRATEGY B: Href Match (Custom Logic)
+            // Handles selectors like: href="/pricing"
+            else if (rule.selector.startsWith('href="') || rule.selector.startsWith("href='")) {
+              var expectedHref = rule.selector
+                .replace(/^href=["']/, '')
+                .replace(/["']$/, '');
+              // Find closest anchor tag
+              var anchor = e.target.closest('a');
+              if (anchor) {
+                var actualHref = anchor.getAttribute('href') || '';
+                // Match if href equals or contains the expected value
+                if (actualHref === expectedHref || actualHref.indexOf(expectedHref) !== -1) {
+                  isMatch = true;
+                }
               }
-            } catch (err) {
-              // Ignore invalid selector errors
-              log("🤖 Invalid selector: " + rule.selector);
+            }
+            // STRATEGY C: Standard CSS Selector
+            else {
+              try {
+                if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
+                  isMatch = true;
+                }
+              } catch (err) {
+                // Ignore invalid selector errors
+                log("🤖 Invalid selector: " + rule.selector);
+              }
             }
           }
 
