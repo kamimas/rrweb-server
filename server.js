@@ -647,9 +647,40 @@ app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
       WHERE sc.campaign_id = ? AND (s.status IS NULL OR s.status = 'dropped_off')
     `).get(id);
 
+    // Sync funnel_config with campaign_rules (LOG_STEP actions)
+    // Fetch rules where action_type = 'LOG_STEP' for this campaign
+    const logStepRules = db.prepare(`
+      SELECT step_key, created_at
+      FROM campaign_rules
+      WHERE campaign_id = ? AND action_type = 'LOG_STEP' AND step_key IS NOT NULL
+      ORDER BY created_at ASC
+    `).all(id);
+
+    // Build funnel_config from rules
+    let funnelConfig = campaign.funnel_config ? JSON.parse(campaign.funnel_config) : [];
+
+    if (logStepRules.length > 0) {
+      // Map rules to funnel steps
+      const ruleSteps = logStepRules.map(rule => ({
+        name: rule.step_key,
+        key: rule.step_key
+      }));
+
+      // Get existing step keys to avoid duplicates
+      const existingKeys = new Set(funnelConfig.map(step => step.key));
+
+      // Append new steps from rules (avoid duplicates)
+      ruleSteps.forEach(step => {
+        if (!existingKeys.has(step.key)) {
+          funnelConfig.push(step);
+          existingKeys.add(step.key);
+        }
+      });
+    }
+
     res.json({
       ...campaign,
-      funnel_config: campaign.funnel_config ? JSON.parse(campaign.funnel_config) : null,
+      funnel_config: funnelConfig.length > 0 ? funnelConfig : null,
       generated_rubric: campaign.generated_rubric ? JSON.parse(campaign.generated_rubric) : null,
       session_count: sessionCount?.count || 0,
       completed_count: completedCount?.count || 0,
