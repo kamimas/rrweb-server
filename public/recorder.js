@@ -3,7 +3,7 @@
   "use strict";
 
   // Version - check this in console: window.RRWEB_RECORDER_VERSION
-  var VERSION = "1.2.0-gtm";
+  var VERSION = "1.3.0-persist";
   window.RRWEB_RECORDER_VERSION = VERSION;
 
   // Logging utility
@@ -40,41 +40,64 @@
   }
   log("Domain token found: " + DOMAIN_TOKEN.substring(0, 10) + "...");
 
-  // Check for Editor Mode
+  // Check for Editor Mode (with persistence across page navigation)
   var urlParams = new URLSearchParams(window.location.search);
-  var isEditorMode = urlParams.get("__editor_mode") === "true";
-  var editorToken = urlParams.get("token");
-  var campaignId = urlParams.get("campaign_id");
 
-  if (isEditorMode) {
-    log("🎨 Editor Mode Detected");
+  // 1. Check URL params first (highest priority)
+  var isEditorUrl = urlParams.get("__editor_mode") === "true";
 
-    // Security: Verify token matches
-    if (editorToken !== DOMAIN_TOKEN) {
-      logWarn("Editor token mismatch. Ignoring editor mode.");
-    } else {
-      // Pass campaign_id to overlay via global
-      window.__RRWEB_CAMPAIGN_ID = campaignId;
-      window.__RRWEB_DOMAIN_TOKEN = DOMAIN_TOKEN;
+  // 2. Check sessionStorage for persistence (survives page navigation)
+  var storedEditorMode = sessionStorage.getItem("__rrweb_editor_mode");
 
-      var editorUrl = window.RRWEB_SERVER_URL
-        ? window.RRWEB_SERVER_URL.replace("/upload-session", "/editor-overlay.js")
-        : "http://localhost:3000/editor-overlay.js";
+  // Determine editor state
+  var isEditorMode = false;
+  var editorToken = null;
+  var campaignId = null;
 
-      log("🎨 Loading overlay from: " + editorUrl);
+  if (isEditorUrl) {
+    // Fresh editor launch from URL
+    isEditorMode = true;
+    editorToken = urlParams.get("token");
+    campaignId = urlParams.get("campaign_id");
 
-      var editorScript = document.createElement("script");
-      editorScript.src = editorUrl;
-      editorScript.onload = function() {
-        log("🎨 Visual editor loaded successfully");
-      };
-      editorScript.onerror = function() {
-        logError("Failed to load visual editor");
-      };
-      document.head.appendChild(editorScript);
+    // Save to sessionStorage for persistence across navigation
+    sessionStorage.setItem("__rrweb_editor_mode", "true");
+    sessionStorage.setItem("__rrweb_token", editorToken);
+    sessionStorage.setItem("__rrweb_campaign_id", campaignId);
+    log("🎨 Editor Mode: Launched from URL, saved to storage");
+  } else if (storedEditorMode === "true") {
+    // Restored from storage after page navigation
+    isEditorMode = true;
+    editorToken = sessionStorage.getItem("__rrweb_token");
+    campaignId = sessionStorage.getItem("__rrweb_campaign_id");
+    log("🎨 Editor Mode: Restored from sessionStorage");
+  }
 
-      return; // Don't initialize recorder in editor mode
-    }
+  if (isEditorMode && editorToken) {
+    log("🎨 Editor Mode Active (token: " + editorToken.substring(0, 10) + "...)");
+
+    // Pass data to overlay via globals
+    window.__RRWEB_EDITOR_TOKEN = editorToken;
+    window.__RRWEB_CAMPAIGN_ID = campaignId;
+    window.__RRWEB_DOMAIN_TOKEN = DOMAIN_TOKEN;
+
+    var editorUrl = window.RRWEB_SERVER_URL
+      ? window.RRWEB_SERVER_URL.replace("/upload-session", "/editor-overlay.js")
+      : "http://localhost:3000/editor-overlay.js";
+
+    log("🎨 Loading overlay from: " + editorUrl);
+
+    var editorScript = document.createElement("script");
+    editorScript.src = editorUrl;
+    editorScript.onload = function() {
+      log("🎨 Visual editor loaded successfully");
+    };
+    editorScript.onerror = function() {
+      logError("Failed to load visual editor");
+    };
+    document.head.appendChild(editorScript);
+
+    return; // Don't initialize recorder in editor mode
   }
 
   // Storage keys

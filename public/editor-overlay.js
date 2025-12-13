@@ -1,7 +1,9 @@
 (function() {
-  console.log("🎨 Visual Editor: GTM Mode");
+  console.log("🎨 Visual Editor: GTM Mode v1.3");
 
-  var SERVER_URL = window.RRWEB_SERVER_URL || "http://localhost:3000";
+  // Fix: Strip '/upload-session' from the base URL to get the root origin
+  var RAW_URL = window.RRWEB_SERVER_URL || "http://localhost:3000";
+  var SERVER_URL = RAW_URL.replace('/upload-session', '').replace(/\/$/, '');
   let isInspectMode = true;
   let activeElement = null;
 
@@ -221,6 +223,7 @@
   controlBar.innerHTML = `
     <button id="mode-browse" class="toggle-btn">👆 Browse</button>
     <button id="mode-inspect" class="toggle-btn active">🎯 Inspect</button>
+    <button id="mode-exit" class="toggle-btn" style="color:#ef4444;">✕ Exit</button>
   `;
   shadow.appendChild(controlBar);
 
@@ -451,11 +454,21 @@
   // --- SAVE LOGIC (JSON PAYLOAD) ---
   function saveRule(action, conditions, stepKey) {
     const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    const campaignId = params.get('campaign_id');
+
+    // Try URL params first, then fallback to globals/storage (persistence)
+    let token = params.get('token');
+    let campaignId = params.get('campaign_id');
+
+    // Fallback to persistence if URL params are empty (after navigation)
+    if (!token) {
+      token = window.__RRWEB_EDITOR_TOKEN || sessionStorage.getItem("__rrweb_token");
+    }
+    if (!campaignId) {
+      campaignId = window.__RRWEB_CAMPAIGN_ID || sessionStorage.getItem("__rrweb_campaign_id");
+    }
 
     if (!token || !campaignId) {
-      alert("❌ Error: Missing token or campaign_id in URL.\n\nExpected format:\n?__editor_mode=true&token=YOUR_TOKEN&campaign_id=123");
+      alert("❌ Session Lost.\n\nPlease close this tab and re-launch the Visual Editor from your Dashboard.");
       return;
     }
 
@@ -538,6 +551,19 @@
     isInspectMode = true;
     btnInspect.classList.add('active');
     btnBrowse.classList.remove('active');
+  };
+
+  // Exit button - clears editor mode and reloads
+  const btnExit = shadow.getElementById('mode-exit');
+  btnExit.onclick = () => {
+    if (confirm("Exit Visual Editor?\n\nThis will end your editing session.")) {
+      // Clear persistence
+      sessionStorage.removeItem("__rrweb_editor_mode");
+      sessionStorage.removeItem("__rrweb_token");
+      sessionStorage.removeItem("__rrweb_campaign_id");
+      // Reload without editor params
+      window.location.href = window.location.pathname;
+    }
   };
 
   function closeMenu() {
