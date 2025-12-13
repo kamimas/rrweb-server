@@ -2,6 +2,10 @@
 (function() {
   "use strict";
 
+  // Version - check this in console: window.RRWEB_RECORDER_VERSION
+  var VERSION = "1.2.0-gtm";
+  window.RRWEB_RECORDER_VERSION = VERSION;
+
   // Logging utility
   var LOG_PREFIX = "🎥 [rrweb]";
   function log(message, data) {
@@ -26,7 +30,7 @@
     }
   }
 
-  log("Initializing recorder...");
+  log("Initializing recorder v" + VERSION + "...");
 
   // Read the domain key from the script tag's data attribute
   var DOMAIN_TOKEN = document.currentScript.getAttribute("data-domain-key");
