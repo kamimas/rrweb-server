@@ -1,11 +1,16 @@
 (function() {
-  console.log("🎨 Visual Editor: GTM Mode v1.3");
+  console.log("🎨 Visual Editor: HUD Mode v1.4");
 
   // Fix: Strip '/upload-session' from the base URL to get the root origin
   var RAW_URL = window.RRWEB_SERVER_URL || "http://localhost:3000";
   var SERVER_URL = RAW_URL.replace('/upload-session', '').replace(/\/$/, '');
   let isInspectMode = true;
   let activeElement = null;
+
+  // Get Context from URL or persistence
+  const params = new URLSearchParams(window.location.search);
+  const CAMPAIGN_ID = parseInt(params.get('campaign_id') || window.__RRWEB_CAMPAIGN_ID || sessionStorage.getItem("__rrweb_campaign_id"));
+  const TOKEN = params.get('token') || window.__RRWEB_EDITOR_TOKEN || sessionStorage.getItem("__rrweb_token");
 
   // --- UI SETUP ---
   const container = document.createElement('div');
@@ -211,9 +216,149 @@
     .btn-start:hover { background: #2563eb; }
     .btn-stop { background: #ef4444; color: white; }
     .btn-stop:hover { background: #dc2626; }
+
+    /* CAMPAIGN HUD SIDEBAR */
+    .campaign-hud {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      width: 280px;
+      background: white;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      z-index: 2147483647;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-height: 70vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .hud-header {
+      padding: 12px 16px;
+      background: linear-gradient(to right, #1f2937, #374151);
+      color: white;
+      font-weight: 700;
+      font-size: 13px;
+      border-radius: 12px 12px 0 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .hud-header-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .hud-refresh {
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: background 0.15s;
+      font-size: 14px;
+    }
+    .hud-refresh:hover {
+      background: rgba(255,255,255,0.1);
+    }
+    .hud-content {
+      overflow-y: auto;
+      padding: 12px;
+      flex: 1;
+    }
+    .hud-section {
+      margin-bottom: 16px;
+    }
+    .hud-section:last-child {
+      margin-bottom: 0;
+    }
+    .hud-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #6b7280;
+      margin-bottom: 8px;
+      padding-left: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .hud-count {
+      background: #e5e7eb;
+      color: #374151;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+    }
+    .hud-item {
+      padding: 10px 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: #374151;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      transition: all 0.15s;
+    }
+    .hud-item:hover {
+      background: #f3f4f6;
+      border-color: #d1d5db;
+    }
+    .hud-item:last-child {
+      margin-bottom: 0;
+    }
+    .hud-icon {
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .hud-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .hud-text-main {
+      font-weight: 600;
+      color: #111827;
+      word-break: break-word;
+    }
+    .hud-text-sub {
+      font-size: 10px;
+      color: #9ca3af;
+      margin-top: 2px;
+      font-family: "SF Mono", Monaco, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hud-empty {
+      font-style: italic;
+      color: #9ca3af;
+      padding: 8px 12px;
+      font-size: 12px;
+      background: #fafafa;
+      border-radius: 6px;
+      text-align: center;
+    }
+    .hud-loading {
+      padding: 20px;
+      text-align: center;
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    .hud-error {
+      padding: 12px;
+      text-align: center;
+      color: #dc2626;
+      font-size: 12px;
+      background: #fef2f2;
+      border-radius: 6px;
+    }
   `;
   shadow.appendChild(style);
 
+  // --- ELEMENTS ---
   const highlighter = document.createElement('div');
   highlighter.className = 'highlighter';
   shadow.appendChild(highlighter);
@@ -231,8 +376,141 @@
   menu.className = 'editor-menu';
   shadow.appendChild(menu);
 
+  // HUD Sidebar
+  const hud = document.createElement('div');
+  hud.className = 'campaign-hud';
+  hud.innerHTML = `
+    <div class="hud-header">
+      <div class="hud-header-title">
+        <span>📊</span>
+        <span>Campaign #${CAMPAIGN_ID || '?'}</span>
+      </div>
+      <span class="hud-refresh" id="refresh-hud" title="Refresh">↻</span>
+    </div>
+    <div class="hud-content" id="hud-list">
+      <div class="hud-loading">Loading campaign state...</div>
+    </div>
+  `;
+  shadow.appendChild(hud);
+
+  // --- LOGIC: FETCH CAMPAIGN STATE ---
+  function fetchCampaignState() {
+    if (!TOKEN || !CAMPAIGN_ID) {
+      shadow.getElementById('hud-list').innerHTML = `<div class="hud-error">Missing token or campaign ID</div>`;
+      return;
+    }
+
+    shadow.getElementById('hud-list').innerHTML = `<div class="hud-loading">Loading...</div>`;
+
+    fetch(`${SERVER_URL}/api/projects/${TOKEN}/config`)
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to fetch config');
+        return res.json();
+      })
+      .then(data => {
+        // Filter rules for THIS campaign only
+        const rules = (data.rules || []).filter(r => r.campaign_id === CAMPAIGN_ID);
+        renderHud(rules);
+      })
+      .catch(err => {
+        console.error('HUD fetch error:', err);
+        shadow.getElementById('hud-list').innerHTML = `<div class="hud-error">Error loading config</div>`;
+      });
+  }
+
+  function renderHud(rules) {
+    const list = shadow.getElementById('hud-list');
+    list.innerHTML = '';
+
+    // Group rules by action type
+    const starts = rules.filter(r => r.action_type === 'START_RECORDING');
+    const stops = rules.filter(r => r.action_type === 'STOP_RECORDING');
+    const steps = rules.filter(r => r.action_type === 'LOG_STEP');
+
+    // Helper to describe a rule
+    function describeRule(rule) {
+      let main = rule.selector;
+      let sub = rule.trigger_type;
+
+      try {
+        const parsed = JSON.parse(rule.selector);
+        if (parsed.conditions && Array.isArray(parsed.conditions)) {
+          // Build readable description from conditions
+          const parts = parsed.conditions.map(c => {
+            if (c.type === 'CLICK_TEXT') return `"${c.val}"`;
+            if (c.type === 'CLICK_ID') return c.val;
+            if (c.type === 'PAGE_PATH') return `on ${c.val}`;
+            if (c.type === 'CLICK_HREF') return `href: ${c.val}`;
+            return c.val;
+          });
+          main = parts.join(' + ');
+          sub = `${parsed.conditions.length} condition${parsed.conditions.length > 1 ? 's' : ''} (AND)`;
+        }
+      } catch (e) {
+        // Not JSON, use selector as-is
+      }
+
+      return { main, sub };
+    }
+
+    // Render a single item
+    function renderItem(icon, rule, label) {
+      const desc = describeRule(rule);
+      return `
+        <div class="hud-item">
+          <span class="hud-icon">${icon}</span>
+          <div class="hud-text">
+            <div class="hud-text-main">${label || desc.main}</div>
+            <div class="hud-text-sub" title="${rule.selector}">${desc.sub}</div>
+          </div>
+        </div>`;
+    }
+
+    // 1. START TRIGGERS SECTION
+    list.innerHTML += `
+      <div class="hud-section">
+        <div class="hud-label">
+          <span>🟢 Start Triggers</span>
+          <span class="hud-count">${starts.length}</span>
+        </div>
+        ${starts.length === 0
+          ? '<div class="hud-empty">No start trigger defined</div>'
+          : starts.map(r => renderItem('▶️', r)).join('')
+        }
+      </div>`;
+
+    // 2. FUNNEL STEPS SECTION
+    list.innerHTML += `
+      <div class="hud-section">
+        <div class="hud-label">
+          <span>📍 Funnel Steps</span>
+          <span class="hud-count">${steps.length}</span>
+        </div>
+        ${steps.length === 0
+          ? '<div class="hud-empty">No steps defined yet</div>'
+          : steps.map((r, i) => renderItem(`${i + 1}.`, r, r.step_key)).join('')
+        }
+      </div>`;
+
+    // 3. STOP TRIGGERS SECTION
+    list.innerHTML += `
+      <div class="hud-section">
+        <div class="hud-label">
+          <span>🛑 Stop Triggers</span>
+          <span class="hud-count">${stops.length}</span>
+        </div>
+        ${stops.length === 0
+          ? '<div class="hud-empty">Manual stop only</div>'
+          : stops.map(r => renderItem('⏹️', r)).join('')
+        }
+      </div>`;
+  }
+
+  // Initial fetch
+  fetchCampaignState();
+  shadow.getElementById('refresh-hud').onclick = fetchCampaignState;
+
   // --- LOGIC: NORMALIZATION (The "Climb Up" Trick) ---
-  // If user clicks an icon/span inside a button or link, target the interactive element
   function normalizeTarget(el) {
     const interactive = el.closest('a, button, [role="button"], input, select, textarea, [onclick]');
     return interactive || el;
@@ -250,14 +528,13 @@
       type: 'PAGE_PATH',
       op: 'contains',
       val: window.location.pathname,
-      checked: false, // Usually don't want to restrict to current page
+      checked: false,
       badge: 'good',
       badgeText: 'Context'
     });
 
-    // 2. Click Text (Strong signal - survives class changes)
+    // 2. Click Text (Strong signal)
     const text = (normEl.innerText || normEl.textContent || "").trim();
-    // Only use text if it's reasonably short and doesn't contain newlines
     if (text && text.length > 0 && text.length <= 80 && !text.includes('\n')) {
       vars.push({
         id: 'text',
@@ -265,7 +542,7 @@
         type: 'CLICK_TEXT',
         op: 'equals',
         val: text,
-        checked: true, // Default: Check this
+        checked: true,
         badge: 'strong',
         badgeText: 'Stable'
       });
@@ -279,13 +556,13 @@
         type: 'CLICK_ID',
         op: 'equals',
         val: '#' + normEl.id,
-        checked: true, // Default: Check this
+        checked: true,
         badge: 'strong',
         badgeText: 'Best'
       });
     }
 
-    // 4. Data attributes (Good for testing frameworks)
+    // 4. Data attributes
     const dataAttrs = ['data-testid', 'data-cy', 'data-test', 'data-action'];
     dataAttrs.forEach(attr => {
       if (normEl.getAttribute(attr)) {
@@ -318,7 +595,7 @@
       });
     }
 
-    // 6. CSS Selector (Fallback - filter out utility classes)
+    // 6. CSS Selector (Fallback)
     let cssPath = normEl.tagName.toLowerCase();
     if (normEl.className && typeof normEl.className === 'string') {
       const utilityPatterns = /^(p|m|w|h|gap|flex|grid|border|bg|text|font|rounded|shadow|hover|focus|active|disabled|transition|duration|ease|transform|scale|rotate|translate|skew|origin|opacity|z|overflow|cursor|select|pointer|sr|whitespace|break|truncate|tracking|leading|list|decoration|underline|line|ring|outline|fill|stroke|inset|top|right|bottom|left|max|min|space|divide|place|items|content|justify|self|order|col|row|auto|span|start|end|hidden|block|inline|table|absolute|relative|fixed|sticky|static|float|clear|object|aspect|columns|container)-/;
@@ -339,7 +616,7 @@
       type: 'CLICK_SELECTOR',
       op: 'matches',
       val: cssPath,
-      checked: false, // Don't auto-check - prefer ID or Text
+      checked: false,
       badge: 'weak',
       badgeText: 'Fallback'
     });
@@ -423,7 +700,7 @@
     shadow.getElementById('btn-step').onclick = () => {
       const conds = getSelectedConditions();
       if (conds.length === 0) {
-        alert("⚠️ Please select at least one condition.");
+        alert("Please select at least one condition.");
         return;
       }
       const key = prompt("Step Name (e.g., 'signup_clicked', 'added_to_cart'):", "custom_step");
@@ -435,7 +712,7 @@
     shadow.getElementById('btn-start').onclick = () => {
       const conds = getSelectedConditions();
       if (conds.length === 0) {
-        alert("⚠️ Please select at least one condition.");
+        alert("Please select at least one condition.");
         return;
       }
       saveRule('START_RECORDING', conds);
@@ -444,7 +721,7 @@
     shadow.getElementById('btn-stop').onclick = () => {
       const conds = getSelectedConditions();
       if (conds.length === 0) {
-        alert("⚠️ Please select at least one condition.");
+        alert("Please select at least one condition.");
         return;
       }
       saveRule('STOP_RECORDING', conds);
@@ -453,13 +730,10 @@
 
   // --- SAVE LOGIC (JSON PAYLOAD) ---
   function saveRule(action, conditions, stepKey) {
-    const params = new URLSearchParams(window.location.search);
-
-    // Try URL params first, then fallback to globals/storage (persistence)
+    // Try URL params first, then fallback to globals/storage
     let token = params.get('token');
     let campaignId = params.get('campaign_id');
 
-    // Fallback to persistence if URL params are empty (after navigation)
     if (!token) {
       token = window.__RRWEB_EDITOR_TOKEN || sessionStorage.getItem("__rrweb_token");
     }
@@ -468,7 +742,7 @@
     }
 
     if (!token || !campaignId) {
-      alert("❌ Session Lost.\n\nPlease close this tab and re-launch the Visual Editor from your Dashboard.");
+      alert("Session Lost.\n\nPlease close this tab and re-launch the Visual Editor from your Dashboard.");
       return;
     }
 
@@ -490,7 +764,7 @@
       body: JSON.stringify({
         campaign_id: parseInt(campaignId),
         trigger_type: 'CLICK_ELEMENT',
-        selector: JSON.stringify(rulePayload), // Store as JSON string
+        selector: JSON.stringify(rulePayload),
         action_type: action,
         step_key: stepKey || null
       })
@@ -498,14 +772,15 @@
     .then(res => {
       if (res.ok) {
         const condSummary = conditions.map(c => c.label.split(' ')[0]).join(' + ');
-        alert(`✅ Rule Saved!\n\nConditions: ${condSummary}\nAction: ${action}${stepKey ? '\nStep: ' + stepKey : ''}`);
+        alert(`Rule Saved!\n\nConditions: ${condSummary}\nAction: ${action}${stepKey ? '\nStep: ' + stepKey : ''}`);
         closeMenu();
+        fetchCampaignState(); // Refresh HUD after save
       } else {
-        res.text().then(txt => alert("❌ Error saving rule: " + txt));
+        res.text().then(txt => alert("Error saving rule: " + txt));
       }
     })
     .catch(err => {
-      alert("❌ Network error: " + err.message);
+      alert("Network error: " + err.message);
     });
   }
 
@@ -515,7 +790,6 @@
     if (menu.style.display === 'block') return;
     if (container.contains(e.target)) return;
 
-    // Highlight the "smart" target (e.g., the button, not the span inside it)
     activeElement = normalizeTarget(e.target);
 
     const r = activeElement.getBoundingClientRect();
@@ -553,15 +827,13 @@
     btnBrowse.classList.remove('active');
   };
 
-  // Exit button - clears editor mode and reloads
+  // Exit button
   const btnExit = shadow.getElementById('mode-exit');
   btnExit.onclick = () => {
     if (confirm("Exit Visual Editor?\n\nThis will end your editing session.")) {
-      // Clear persistence
       sessionStorage.removeItem("__rrweb_editor_mode");
       sessionStorage.removeItem("__rrweb_token");
       sessionStorage.removeItem("__rrweb_campaign_id");
-      // Reload without editor params
       window.location.href = window.location.pathname;
     }
   };
@@ -569,7 +841,6 @@
   function closeMenu() {
     menu.style.display = 'none';
     highlighter.style.display = 'none';
-    // Reset highlighter color
     highlighter.style.borderColor = '#ef4444';
     highlighter.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
   }

@@ -468,6 +468,31 @@ app.post("/api/projects/:token/rules", (req, res) => {
 
     console.log(`🤖 Rule created: ${action_type} on ${selector} for campaign ${campaign_id}`);
 
+    // Write-time sync: Add LOG_STEP rules to funnel_config
+    if (action_type === 'LOG_STEP' && step_key) {
+      const campaignData = db.prepare("SELECT funnel_config FROM campaigns WHERE id = ?").get(campaign_id);
+      let config = [];
+
+      // Parse existing funnel_config
+      if (campaignData && campaignData.funnel_config) {
+        try {
+          config = JSON.parse(campaignData.funnel_config);
+          if (!Array.isArray(config)) config = [];
+        } catch (e) {
+          config = [];
+        }
+      }
+
+      // Check if step already exists
+      const exists = config.find(step => step.key === step_key);
+      if (!exists) {
+        config.push({ name: step_key, key: step_key });
+        db.prepare("UPDATE campaigns SET funnel_config = ? WHERE id = ?")
+          .run(JSON.stringify(config), campaign_id);
+        console.log(`📊 Synced step "${step_key}" to funnel_config for campaign ${campaign_id}`);
+      }
+    }
+
     res.status(201).json({
       id: result.lastInsertRowid,
       campaign_id,

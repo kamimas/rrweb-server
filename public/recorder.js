@@ -3,7 +3,7 @@
   "use strict";
 
   // Version - check this in console: window.RRWEB_RECORDER_VERSION
-  var VERSION = "1.3.0-persist";
+  var VERSION = "1.4.0-hud";
   window.RRWEB_RECORDER_VERSION = VERSION;
 
   // Logging utility
