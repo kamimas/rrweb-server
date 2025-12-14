@@ -1,7 +1,7 @@
 /**
  * Video Processing Worker
  *
- * Polls the SQLite queue for sessions to process.
+ * Polls the PostgreSQL queue for sessions to process.
  * For each session: fetches events, generates timeline, renders video, uploads to S3.
  *
  * Run with: node src/worker.js
@@ -10,9 +10,9 @@
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
 const AWS = require('aws-sdk');
 
+const db = require('./db');
 const queue = require('./queue-manager');
 const s3Helpers = require('./s3-helpers');
 const { compressGaps, analyzeGaps } = require('./compress-gaps');
@@ -23,15 +23,8 @@ const { renderVideo } = require('../render-worker');
 const POLL_INTERVAL_MS = 5000;  // Check for work every 5 seconds
 const TEMP_DIR = path.join(__dirname, '../temp');
 
-// Database setup (same path as server.js)
-const dbDir = process.env.NODE_ENV === 'production' ? '/app/data' : path.join(__dirname, '..');
-const dbPath = path.join(dbDir, 'db.sqlite');
-
-console.log(`[Worker] Connecting to database: ${dbPath}`);
-const db = new Database(dbPath);
-
-// Enable WAL mode for concurrent access with server
-db.pragma('journal_mode = WAL');
+// Database connection is managed by src/db.js
+console.log(`[Worker] Using PostgreSQL database`);
 
 // AWS S3 setup
 AWS.config.update({ region: process.env.AWS_REGION });
@@ -46,7 +39,7 @@ async function processSession(sessionId) {
     console.log(`${'='.repeat(60)}`);
 
     // Mark as processing
-    queue.markProcessing(sessionId, db);
+    await queue.markProcessing(sessionId);
 
     // Create temp directory for this session
     const sessionTempDir = path.join(TEMP_DIR, sessionId);
@@ -100,7 +93,7 @@ async function processSession(sessionId) {
         ]);
 
         // 5. Mark as ready
-        queue.markReady(sessionId, videoKey, timelineKey, db);
+        await queue.markReady(sessionId, videoKey, timelineKey);
 
         console.log(`[Worker] Session complete: ${sessionId}`);
         console.log(`[Worker] Video: s3://${bucket}/${videoKey}`);
@@ -108,7 +101,7 @@ async function processSession(sessionId) {
 
     } catch (err) {
         console.error(`[Worker] Error processing ${sessionId}:`, err.message);
-        queue.markFailed(sessionId, db);
+        await queue.markFailed(sessionId);
     } finally {
         // Cleanup temp files
         if (fs.existsSync(sessionTempDir)) {
@@ -143,13 +136,13 @@ async function startWorker() {
     }
 
     // Log initial queue stats
-    const stats = queue.getQueueStats(db);
+    const stats = await queue.getQueueStats();
     console.log(`[Worker] Queue stats: ${JSON.stringify(stats)}`);
 
     // Polling loop
     while (true) {
         try {
-            const sessionId = queue.getNextJob(db);
+            const sessionId = await queue.getNextJob();
 
             if (sessionId) {
                 await processSession(sessionId);
@@ -166,15 +159,15 @@ async function startWorker() {
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     console.log('\n[Worker] Shutting down...');
-    db.close();
+    await db.close();
     process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     console.log('\n[Worker] Shutting down...');
-    db.close();
+    await db.close();
     process.exit(0);
 });
 

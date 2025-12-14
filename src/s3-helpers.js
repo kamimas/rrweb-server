@@ -2,28 +2,39 @@
  * S3 Helper Functions for Session Processing
  *
  * Provides utilities for fetching merged session events and uploading processed assets.
+ * Supports both legacy .json files and new .json.gz (gzipped) files from direct upload.
+ *
+ * IMPORTANT: All functions using db are ASYNC - always use await!
  */
 
 const fs = require('fs');
+const zlib = require('zlib');
+const { promisify } = require('util');
+
+const gunzip = promisify(zlib.gunzip);
 
 /**
  * Fetch and merge all session chunks from S3.
- * Chunks are sorted by timestamp to ensure correct event ordering.
+ * Chunks are sorted by sequence_id (client-assigned) to ensure correct event ordering.
+ * Falls back to timestamp for legacy data without sequence_id.
  *
  * @param {string} sessionId - The session ID to fetch
- * @param {object} db - better-sqlite3 database instance
+ * @param {object} db - PostgreSQL database adapter (src/db.js)
  * @param {object} s3 - AWS S3 client instance
  * @returns {Promise<{events: Array, bucket: string, campaignId: number}>}
  */
 async function fetchMergedSession(sessionId, db, s3) {
-    // Get all chunks for this session, ordered by timestamp
-    const query = `
-        SELECT s3_key, s3_bucket, campaign_id, timestamp
+    // Get all chunks for this session, ordered by sequence_id (with timestamp fallback)
+    // CASE WHEN puts NULL sequence_ids last, then sorts by sequence_id, then timestamp for legacy
+    const { rows: chunks } = await db.query(`
+        SELECT s3_key, s3_bucket, campaign_id, timestamp, sequence_id
         FROM session_chunks
-        WHERE session_id = ?
-        ORDER BY timestamp ASC
-    `;
-    const chunks = db.prepare(query).all(sessionId);
+        WHERE session_id = $1
+        ORDER BY
+            CASE WHEN sequence_id IS NULL THEN 1 ELSE 0 END,
+            sequence_id ASC,
+            timestamp ASC
+    `, [sessionId]);
 
     if (chunks.length === 0) {
         throw new Error(`No chunks found for session: ${sessionId}`);
@@ -44,7 +55,19 @@ async function fetchMergedSession(sessionId, db, s3) {
                 Bucket: chunk.s3_bucket,
                 Key: chunk.s3_key
             }).promise();
-            return JSON.parse(response.Body.toString('utf8'));
+
+            // Handle both gzipped (.json.gz) and plain JSON files
+            let jsonString;
+            if (chunk.s3_key.endsWith('.gz')) {
+                // Decompress gzipped content
+                const decompressed = await gunzip(response.Body);
+                jsonString = decompressed.toString('utf8');
+            } else {
+                // Legacy plain JSON
+                jsonString = response.Body.toString('utf8');
+            }
+
+            return JSON.parse(jsonString);
         } catch (err) {
             console.error(`[S3] Error fetching chunk ${chunk.s3_key}:`, err.message);
             return null;
@@ -108,13 +131,14 @@ async function uploadFile(localPath, s3Key, bucket, s3) {
  * Get the S3 bucket for a session (from its chunks).
  *
  * @param {string} sessionId - The session ID
- * @param {object} db - better-sqlite3 database instance
- * @returns {string|null} - The bucket name or null if not found
+ * @param {object} db - PostgreSQL database adapter (src/db.js)
+ * @returns {Promise<string|null>} - The bucket name or null if not found
  */
-function getSessionBucket(sessionId, db) {
-    const result = db.prepare(
-        'SELECT s3_bucket FROM session_chunks WHERE session_id = ? LIMIT 1'
-    ).get(sessionId);
+async function getSessionBucket(sessionId, db) {
+    const result = await db.queryOne(
+        'SELECT s3_bucket FROM session_chunks WHERE session_id = $1 LIMIT 1',
+        [sessionId]
+    );
 
     return result ? result.s3_bucket : null;
 }

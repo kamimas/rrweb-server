@@ -1,32 +1,42 @@
-// server.js - v1.1.0
+// server.js - v2.0.0 (PostgreSQL)
 "use strict";
 require("dotenv").config();
 const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const AWS = require("aws-sdk");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const zlib = require("zlib");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const NodeCache = require("node-cache");
+const db = require("./src/db");
 const queue = require("./src/queue-manager");
 const aiAnalyst = require("./src/ai-analyst");
 const s3Helpers = require("./src/s3-helpers");
 const { generateTimeline } = require("./timeline-react-aware");
 
 // ----- Session Playback Cache -----
-// TTL: 10 minutes, check for expired keys every 2 minutes, max 100 sessions cached
+// TTL: 10 minutes, check for expired keys every 2 minutes
+// maxKeys: 5000 allows caching many concurrent sessions without hitting limits
 const sessionCache = new NodeCache({
   stdTTL: 600,
   checkperiod: 120,
-  maxKeys: 100,
+  maxKeys: 5000,
   useClones: false  // Don't clone on get (faster, we're read-only)
 });
 
 // ----- Auth Configuration -----
-const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret-in-production";
+// SECURITY: JWT_SECRET must be set via environment variable - no fallback allowed
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("❌ FATAL: JWT_SECRET environment variable is not defined.");
+  console.error("   Generate one with: openssl rand -hex 32");
+  process.exit(1);
+}
 let adminUsers = [];
 try {
   adminUsers = JSON.parse(process.env.ADMIN_USERS || "[]");
@@ -46,259 +56,12 @@ adminUsers = adminUsers.map(user => {
 const rrdom = require("rrdom");
 const rrdomNodejs = require("rrdom-nodejs");
 
-// ----- SQLite Database Setup -----
-const Database = require("better-sqlite3");
-// Use /app/data in Docker, local directory otherwise
-const dbDir = process.env.NODE_ENV === "production" ? "/app/data" : __dirname;
-const dbPath = path.join(dbDir, "db.sqlite");
-const db = new Database(dbPath);
-
-// Enable WAL mode for concurrent read/write (Worker + Server)
-db.pragma('journal_mode = WAL');
-console.log("✅ SQLite WAL mode enabled");
-
-// Initialize database schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS campaigns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS session_chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    distinct_id TEXT NOT NULL,
-    campaign_id INTEGER,
-    s3_key TEXT UNIQUE NOT NULL,
-    s3_bucket TEXT NOT NULL,
-    page_url TEXT,
-    timestamp INTEGER NOT NULL,
-    FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS aliases (
-    distinct_id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
-    status TEXT DEFAULT NULL,
-    watched INTEGER DEFAULT 0,
-    watched_at INTEGER,
-    updated_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS campaign_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    campaign_id INTEGER NOT NULL,
-    trigger_type TEXT NOT NULL,
-    selector TEXT NOT NULL,
-    action_type TEXT NOT NULL,
-    step_key TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_session_chunks_session_id ON session_chunks(session_id);
-  CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
-  CREATE INDEX IF NOT EXISTS idx_session_chunks_distinct_id ON session_chunks(distinct_id);
-  CREATE INDEX IF NOT EXISTS idx_session_chunks_campaign_id ON session_chunks(campaign_id);
-  CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
-  CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
-  CREATE INDEX IF NOT EXISTS idx_campaign_rules_campaign_id ON campaign_rules(campaign_id);
-`);
-
-// Migration: Add s3_bucket column if it doesn't exist (for existing databases)
-try {
-  db.exec(`ALTER TABLE session_chunks ADD COLUMN s3_bucket TEXT`);
-  console.log("✅ Migration: Added s3_bucket column to session_chunks");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Remove local_key column by recreating table (if upgrading from old schema)
-// We just ignore local_key going forward - SQLite doesn't support DROP COLUMN easily
-
-// Migration: Add assets_status column for video/timeline processing state
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN assets_status TEXT DEFAULT 'raw'`);
-  console.log("✅ Migration: Added assets_status column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add video_s3_key column for processed video location
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN video_s3_key TEXT`);
-  console.log("✅ Migration: Added video_s3_key column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add timeline_s3_key column for processed timeline location
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN timeline_s3_key TEXT`);
-  console.log("✅ Migration: Added timeline_s3_key column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Create index for assets_status queries
-try {
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_assets_status ON sessions(assets_status)`);
-} catch (e) {
-  // Index already exists, ignore
-}
-
-// Migration: Add ai_report column to campaigns for storing AI analysis reports
-try {
-  db.exec(`ALTER TABLE campaigns ADD COLUMN ai_report TEXT`);
-  console.log("✅ Migration: Added ai_report column to campaigns");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add ai_analysis_status column to campaigns for tracking analysis state
-try {
-  db.exec(`ALTER TABLE campaigns ADD COLUMN ai_analysis_status TEXT DEFAULT 'pending'`);
-  console.log("✅ Migration: Added ai_analysis_status column to campaigns");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add mission_brief column for free-text funnel description
-// The AI will dynamically generate analysis categories from this
-try {
-  db.exec(`ALTER TABLE campaigns ADD COLUMN mission_brief TEXT`);
-  console.log("✅ Migration: Added mission_brief column to campaigns");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add generated_rubric column to store the AI-generated analysis config
-try {
-  db.exec(`ALTER TABLE campaigns ADD COLUMN generated_rubric TEXT`);
-  console.log("✅ Migration: Added generated_rubric column to campaigns");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add per-session AI diagnosis fields
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN ai_diagnosis TEXT`);
-  console.log("✅ Migration: Added ai_diagnosis column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN ai_evidence TEXT`);
-  console.log("✅ Migration: Added ai_evidence column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN ai_last_step TEXT`);
-  console.log("✅ Migration: Added ai_last_step column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN ai_progress INTEGER`);
-  console.log("✅ Migration: Added ai_progress column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add funnel_config column to campaigns for step-based tracking
-try {
-  db.exec(`ALTER TABLE campaigns ADD COLUMN funnel_config TEXT`);
-  console.log("✅ Migration: Added funnel_config column to campaigns");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-// Migration: Add furthest_step_index column to sessions for funnel progress tracking
-try {
-  db.exec(`ALTER TABLE sessions ADD COLUMN furthest_step_index INTEGER DEFAULT -1`);
-  console.log("✅ Migration: Added furthest_step_index column to sessions");
-} catch (e) {
-  // Column already exists, ignore
-}
-
-console.log("✅ SQLite database initialized at:", dbPath);
-
-// Prepare statements for better performance
-// insertCampaign removed - using inline prepare with analysis_config
-
-const getCampaignByName = db.prepare(`
-  SELECT id, name, created_at FROM campaigns WHERE name = ?
-`);
-
-const getCampaignById = db.prepare(`
-  SELECT id, name, created_at FROM campaigns WHERE id = ?
-`);
-
-const getAllCampaigns = db.prepare(`
-  SELECT c.id, c.name, c.created_at,
-    (SELECT COUNT(DISTINCT sc.session_id) FROM session_chunks sc WHERE sc.campaign_id = c.id) as session_count,
-    (SELECT COUNT(DISTINCT sc2.session_id) FROM session_chunks sc2
-     LEFT JOIN sessions s ON sc2.session_id = s.session_id
-     WHERE sc2.campaign_id = c.id AND s.status = 'completed') as completed_count,
-    (SELECT COUNT(DISTINCT sc3.session_id) FROM session_chunks sc3
-     LEFT JOIN sessions s2 ON sc3.session_id = s2.session_id
-     WHERE sc3.campaign_id = c.id AND (s2.status IS NULL OR s2.status = 'dropped_off')) as dropped_off_count
-  FROM campaigns c
-  ORDER BY c.created_at DESC
-`);
-
-const deleteCampaignById = db.prepare(`
-  DELETE FROM campaigns WHERE id = ?
-`);
-
-const deleteSessionChunksByCampaignId = db.prepare(`
-  DELETE FROM session_chunks WHERE campaign_id = ?
-`);
-
-const getSessionCountByCampaignId = db.prepare(`
-  SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE campaign_id = ?
-`);
-
-const insertSessionChunk = db.prepare(`
-  INSERT OR IGNORE INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
-`);
-
-const insertUser = db.prepare(`
-  INSERT OR IGNORE INTO users (email) VALUES (?)
-`);
-
-const getUserByEmail = db.prepare(`
-  SELECT id FROM users WHERE email = ?
-`);
-
-const insertAlias = db.prepare(`
-  INSERT OR REPLACE INTO aliases (distinct_id, user_id) VALUES (?, ?)
-`);
-
-const upsertSessionStatus = db.prepare(`
-  INSERT INTO sessions (session_id, status, updated_at) VALUES (?, ?, ?)
-  ON CONFLICT(session_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
-`);
-
-const getSessionStatus = db.prepare(`
-  SELECT status FROM sessions WHERE session_id = ?
-`);
+// ----- PostgreSQL Database -----
+// Database connection is managed by src/db.js
+// All queries are ASYNC - always use await!
+console.log("✅ Using PostgreSQL database");
+// Schema is managed via docs/schema.sql - run it on your PostgreSQL instance
+// All queries are now async - use await db.query() or db.queryOne()
 
 const app = express();
 
@@ -376,7 +139,7 @@ app.options("/api/projects/:token/config", (req, res) => {
   res.sendStatus(200);
 });
 
-app.get("/api/projects/:token/config", (req, res) => {
+app.get("/api/projects/:token/config", async (req, res) => {
   // CORS: Allow any origin since SDK runs on client websites
   res.header("Access-Control-Allow-Origin", "*");
 
@@ -390,7 +153,7 @@ app.get("/api/projects/:token/config", (req, res) => {
 
   try {
     // Get all rules joined with campaign names
-    const rules = db.prepare(`
+    const { rows: rules } = await db.query(`
       SELECT
         cr.trigger_type,
         cr.selector,
@@ -400,7 +163,7 @@ app.get("/api/projects/:token/config", (req, res) => {
       FROM campaign_rules cr
       JOIN campaigns c ON cr.campaign_id = c.id
       ORDER BY c.id, cr.id
-    `).all();
+    `);
 
     res.json({ rules });
   } catch (err) {
@@ -418,7 +181,7 @@ app.options("/api/projects/:token/rules", (req, res) => {
   res.sendStatus(200);
 });
 
-app.post("/api/projects/:token/rules", (req, res) => {
+app.post("/api/projects/:token/rules", async (req, res) => {
   res.header("Access-Control-Allow-Origin", "*");
 
   const { token } = req.params;
@@ -455,22 +218,22 @@ app.post("/api/projects/:token/rules", (req, res) => {
     }
 
     // Verify campaign exists
-    const campaign = db.prepare("SELECT id FROM campaigns WHERE id = ?").get(campaign_id);
+    const campaign = await db.queryOne("SELECT id FROM campaigns WHERE id = $1", [campaign_id]);
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
 
     // Insert rule
-    const result = db.prepare(`
+    const result = await db.insert(`
       INSERT INTO campaign_rules (campaign_id, trigger_type, selector, action_type, step_key, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(campaign_id, trigger_type, selector, action_type, step_key || null, Date.now());
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+    `, [campaign_id, trigger_type, selector, action_type, step_key || null, Date.now()]);
 
     console.log(`🤖 Rule created: ${action_type} on ${selector} for campaign ${campaign_id}`);
 
     // Write-time sync: Add LOG_STEP rules to funnel_config
     if (action_type === 'LOG_STEP' && step_key) {
-      const campaignData = db.prepare("SELECT funnel_config FROM campaigns WHERE id = ?").get(campaign_id);
+      const campaignData = await db.queryOne("SELECT funnel_config FROM campaigns WHERE id = $1", [campaign_id]);
       let config = [];
 
       // Parse existing funnel_config
@@ -487,14 +250,14 @@ app.post("/api/projects/:token/rules", (req, res) => {
       const exists = config.find(step => step.key === step_key);
       if (!exists) {
         config.push({ name: step_key, key: step_key });
-        db.prepare("UPDATE campaigns SET funnel_config = ? WHERE id = ?")
-          .run(JSON.stringify(config), campaign_id);
+        await db.query("UPDATE campaigns SET funnel_config = $1 WHERE id = $2",
+          [JSON.stringify(config), campaign_id]);
         console.log(`📊 Synced step "${step_key}" to funnel_config for campaign ${campaign_id}`);
       }
     }
 
     res.status(201).json({
-      id: result.lastInsertRowid,
+      id: result.id,
       campaign_id,
       trigger_type,
       selector,
@@ -592,12 +355,17 @@ AWS.config.update({
 });
 const s3 = new AWS.S3();
 
+// AWS SDK v3 Client (for presigned URLs - more efficient)
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION
+});
+
 // =====================================================
 // CAMPAIGN ENDPOINTS
 // =====================================================
 
 // Create campaign (auth required)
-app.post("/api/campaigns", authenticateJWT, (req, res) => {
+app.post("/api/campaigns", authenticateJWT, async (req, res) => {
   try {
     const { name, mission_brief, funnel_config } = req.body;
     if (!name || typeof name !== "string" || name.trim().length === 0) {
@@ -607,7 +375,10 @@ app.post("/api/campaigns", authenticateJWT, (req, res) => {
     const trimmedName = name.trim();
 
     // Check if campaign already exists
-    const existing = getCampaignByName.get(trimmedName);
+    const existing = await db.queryOne(
+      'SELECT id, name, created_at FROM campaigns WHERE name = $1',
+      [trimmedName]
+    );
     if (existing) {
       return res.status(409).json({ error: "Campaign name already exists" });
     }
@@ -616,13 +387,15 @@ app.post("/api/campaigns", authenticateJWT, (req, res) => {
     const funnelConfigStr = funnel_config ? JSON.stringify(funnel_config) : null;
 
     const createdAt = Date.now();
-    const result = db.prepare(`
-      INSERT INTO campaigns (name, created_at, mission_brief, funnel_config) VALUES (?, ?, ?, ?)
-    `).run(trimmedName, createdAt, mission_brief || null, funnelConfigStr);
+    const result = await db.insert(
+      `INSERT INTO campaigns (name, created_at, mission_brief, funnel_config)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [trimmedName, createdAt, mission_brief || null, funnelConfigStr]
+    );
 
     console.log(`📋 Campaign created: ${trimmedName}`);
     res.status(201).json({
-      id: result.lastInsertRowid,
+      id: result.id,
       name: trimmedName,
       created_at: createdAt,
       mission_brief: mission_brief || null,
@@ -635,9 +408,20 @@ app.post("/api/campaigns", authenticateJWT, (req, res) => {
 });
 
 // List campaigns (auth required)
-app.get("/api/campaigns", authenticateJWT, (req, res) => {
+app.get("/api/campaigns", authenticateJWT, async (req, res) => {
   try {
-    const campaigns = getAllCampaigns.all();
+    const { rows: campaigns } = await db.query(`
+      SELECT c.id, c.name, c.created_at,
+        (SELECT COUNT(DISTINCT sc.session_id) FROM session_chunks sc WHERE sc.campaign_id = c.id) as session_count,
+        (SELECT COUNT(DISTINCT sc2.session_id) FROM session_chunks sc2
+         LEFT JOIN sessions s ON sc2.session_id = s.session_id
+         WHERE sc2.campaign_id = c.id AND s.status = 'completed') as completed_count,
+        (SELECT COUNT(DISTINCT sc3.session_id) FROM session_chunks sc3
+         LEFT JOIN sessions s2 ON sc3.session_id = s2.session_id
+         WHERE sc3.campaign_id = c.id AND (s2.status IS NULL OR s2.status = 'dropped_off')) as dropped_off_count
+      FROM campaigns c
+      ORDER BY c.created_at DESC
+    `);
     res.json({ campaigns });
   } catch (err) {
     console.error("Error in GET /api/campaigns:", err);
@@ -646,55 +430,52 @@ app.get("/api/campaigns", authenticateJWT, (req, res) => {
 });
 
 // Get campaign by ID (auth required)
-app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
+app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const campaign = db.prepare(`
+    const campaign = await db.queryOne(`
       SELECT id, name, created_at, mission_brief, funnel_config, generated_rubric, ai_report, ai_analysis_status
-      FROM campaigns WHERE id = ?
-    `).get(id);
+      FROM campaigns WHERE id = $1
+    `, [id]);
 
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
 
-    const sessionCount = getSessionCountByCampaignId.get(id);
-    const completedCount = db.prepare(`
+    const sessionCount = await db.queryOne(
+      'SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE campaign_id = $1',
+      [id]
+    );
+    const completedCount = await db.queryOne(`
       SELECT COUNT(DISTINCT sc.session_id) as count
       FROM session_chunks sc
       LEFT JOIN sessions s ON sc.session_id = s.session_id
-      WHERE sc.campaign_id = ? AND s.status = 'completed'
-    `).get(id);
-    const droppedOffCount = db.prepare(`
+      WHERE sc.campaign_id = $1 AND s.status = 'completed'
+    `, [id]);
+    const droppedOffCount = await db.queryOne(`
       SELECT COUNT(DISTINCT sc.session_id) as count
       FROM session_chunks sc
       LEFT JOIN sessions s ON sc.session_id = s.session_id
-      WHERE sc.campaign_id = ? AND (s.status IS NULL OR s.status = 'dropped_off')
-    `).get(id);
+      WHERE sc.campaign_id = $1 AND (s.status IS NULL OR s.status = 'dropped_off')
+    `, [id]);
 
     // Sync funnel_config with campaign_rules (LOG_STEP actions)
-    // Fetch rules where action_type = 'LOG_STEP' for this campaign
-    const logStepRules = db.prepare(`
+    const { rows: logStepRules } = await db.query(`
       SELECT step_key, created_at
       FROM campaign_rules
-      WHERE campaign_id = ? AND action_type = 'LOG_STEP' AND step_key IS NOT NULL
+      WHERE campaign_id = $1 AND action_type = 'LOG_STEP' AND step_key IS NOT NULL
       ORDER BY created_at ASC
-    `).all(id);
+    `, [id]);
 
     // Build funnel_config from rules
     let funnelConfig = campaign.funnel_config ? JSON.parse(campaign.funnel_config) : [];
 
     if (logStepRules.length > 0) {
-      // Map rules to funnel steps
       const ruleSteps = logStepRules.map(rule => ({
         name: rule.step_key,
         key: rule.step_key
       }));
-
-      // Get existing step keys to avoid duplicates
       const existingKeys = new Set(funnelConfig.map(step => step.key));
-
-      // Append new steps from rules (avoid duplicates)
       ruleSteps.forEach(step => {
         if (!existingKeys.has(step.key)) {
           funnelConfig.push(step);
@@ -718,14 +499,14 @@ app.get("/api/campaigns/:id", authenticateJWT, (req, res) => {
 });
 
 // Update campaign (auth required)
-app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
+app.put("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, mission_brief, funnel_config } = req.body;
 
-    const campaign = db.prepare(`
-      SELECT id, name, created_at, mission_brief, funnel_config FROM campaigns WHERE id = ?
-    `).get(id);
+    const campaign = await db.queryOne(`
+      SELECT id, name, created_at, mission_brief, funnel_config FROM campaigns WHERE id = $1
+    `, [id]);
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
@@ -734,29 +515,28 @@ app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
     let trimmedName = campaign.name;
     if (name && typeof name === "string" && name.trim().length > 0) {
       trimmedName = name.trim();
-      // Check if new name already exists (excluding current campaign)
-      const existing = getCampaignByName.get(trimmedName);
+      const existing = await db.queryOne(
+        'SELECT id, name FROM campaigns WHERE name = $1',
+        [trimmedName]
+      );
       if (existing && existing.id !== parseInt(id)) {
         return res.status(409).json({ error: "Campaign name already exists" });
       }
     }
 
-    // Handle mission_brief update
     let newMissionBrief = campaign.mission_brief;
     if (mission_brief !== undefined) {
       newMissionBrief = mission_brief || null;
     }
 
-    // Handle funnel_config update
-    // Format: [{ name: "Landing", key: "view_home" }, ...]
     let newFunnelConfig = campaign.funnel_config;
     if (funnel_config !== undefined) {
       newFunnelConfig = funnel_config ? JSON.stringify(funnel_config) : null;
     }
 
-    db.prepare(`
-      UPDATE campaigns SET name = ?, mission_brief = ?, funnel_config = ? WHERE id = ?
-    `).run(trimmedName, newMissionBrief, newFunnelConfig, id);
+    await db.query(`
+      UPDATE campaigns SET name = $1, mission_brief = $2, funnel_config = $3 WHERE id = $4
+    `, [trimmedName, newMissionBrief, newFunnelConfig, id]);
 
     console.log(`📝 Campaign updated: ${campaign.name} -> ${trimmedName}`);
     res.json({
@@ -773,23 +553,28 @@ app.put("/api/campaigns/:id", authenticateJWT, (req, res) => {
 });
 
 // Delete campaign (auth required)
-app.delete("/api/campaigns/:id", authenticateJWT, (req, res) => {
+app.delete("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const campaign = getCampaignById.get(id);
+    const campaign = await db.queryOne(
+      'SELECT id, name, created_at FROM campaigns WHERE id = $1',
+      [id]
+    );
 
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
 
-    // Get session count before deletion
-    const sessionCount = getSessionCountByCampaignId.get(id);
+    const sessionCount = await db.queryOne(
+      'SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE campaign_id = $1',
+      [id]
+    );
 
     // Delete session chunks first (foreign key)
-    deleteSessionChunksByCampaignId.run(id);
+    await db.query('DELETE FROM session_chunks WHERE campaign_id = $1', [id]);
 
     // Delete campaign
-    deleteCampaignById.run(id);
+    await db.query('DELETE FROM campaigns WHERE id = $1', [id]);
 
     console.log(`🗑️  Campaign deleted: ${campaign.name} (${sessionCount?.count || 0} sessions)`);
     res.json({
@@ -806,8 +591,174 @@ app.delete("/api/campaigns/:id", authenticateJWT, (req, res) => {
 // SESSION ENDPOINTS
 // =====================================================
 
+// ----- Direct Upload: Get Presigned URL -----
+// Client requests a presigned URL, then uploads directly to S3
+// This keeps heavy payloads off the Node.js server
+app.post("/api/sessions/:sessionId/upload-url", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { chunkTimestamp, campaign, distinctId, pageUrl, host, domainToken, sequenceId } = req.body;
+
+    // Validate required fields
+    if (!sessionId || !chunkTimestamp || !campaign || !distinctId || !host || !domainToken) {
+      return res.status(400).json({
+        error: "Missing required fields: sessionId, chunkTimestamp, campaign, distinctId, host, domainToken"
+      });
+    }
+
+    // Parse sequence ID (optional for backward compatibility)
+    const seqId = (sequenceId !== undefined && sequenceId !== null) ? parseInt(sequenceId, 10) : null;
+
+    // Validate domain token
+    if (!allowedDomains[host] || allowedDomains[host].token !== domainToken) {
+      return res.status(403).json({ error: "Invalid domain or token" });
+    }
+
+    // Get bucket for this domain
+    const bucketName = allowedDomains[host].bucket;
+    if (!bucketName) {
+      return res.status(500).json({ error: "S3 bucket not configured for domain" });
+    }
+
+    // Validate campaign exists
+    const campaignRecord = await db.queryOne("SELECT id, name FROM campaigns WHERE name = $1", [campaign]);
+    if (!campaignRecord) {
+      return res.status(404).json({ error: `Campaign not found: ${campaign}` });
+    }
+
+    // Generate unique S3 key for this chunk
+    // Format: recordings/{campaignId}/{sessionId}/{timestamp}_{uuid}.json.gz
+    const randomSuffix = uuidv4().substring(0, 8);
+    const s3Key = `recordings/${campaignRecord.id}/${sessionId}/${chunkTimestamp}_${randomSuffix}.json.gz`;
+
+    // Generate presigned PUT URL (60 second expiry)
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: s3Key,
+      ContentType: "application/gzip"
+    });
+
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 60 });
+
+    // Record the intent to upload in DB immediately
+    // If upload fails, we have a pointer to non-existent file (player handles gracefully)
+    await db.query(`
+      INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId]);
+
+    console.log(`🎫 Presigned URL issued: ${sessionId} -> s3://${bucketName}/${s3Key} (seq: ${seqId})`);
+
+    res.json({
+      uploadUrl,
+      s3Key,
+      expiresIn: 60
+    });
+  } catch (err) {
+    console.error("Error in POST /api/sessions/:sessionId/upload-url:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ----- Final Flush: Lightweight endpoint for tab close -----
+// Uses sendBeacon - accepts plain JSON, no gzip (small final chunks only)
+// This is the ONLY endpoint that touches event data on the server (for reliability on tab close)
+// Sequence ID passed via query string: /flush?seq=10 (since sendBeacon can't send custom JSON with Blob)
+app.post("/api/sessions/:sessionId/flush", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    // Parse sequence ID from query string (fallback to high number for legacy clients)
+    const seqId = req.query.seq !== undefined ? parseInt(req.query.seq, 10) : null;
+
+    // sendBeacon sends as text/plain or application/json
+    // Parse body if it's a string (sendBeacon with Blob)
+    let body = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        return res.status(400).json({ error: "Invalid JSON" });
+      }
+    }
+    // Handle raw buffer from text/plain
+    if (Buffer.isBuffer(body)) {
+      try {
+        body = JSON.parse(body.toString('utf8'));
+      } catch (e) {
+        return res.status(400).json({ error: "Invalid JSON" });
+      }
+    }
+
+    const { events, campaign, distinctId, pageUrl, host, domainToken, timestamp } = body;
+
+    // Validate required fields
+    if (!sessionId || !events || !Array.isArray(events) || !campaign || !distinctId || !host || !domainToken) {
+      console.log(`🚨 Flush validation failed for ${sessionId}`);
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Validate domain token
+    if (!allowedDomains[host] || allowedDomains[host].token !== domainToken) {
+      return res.status(403).json({ error: "Invalid domain or token" });
+    }
+
+    const bucketName = allowedDomains[host].bucket;
+    if (!bucketName) {
+      return res.status(500).json({ error: "S3 bucket not configured" });
+    }
+
+    // Validate campaign
+    const campaignRecord = await db.queryOne("SELECT id, name FROM campaigns WHERE name = $1", [campaign]);
+    if (!campaignRecord) {
+      return res.status(404).json({ error: `Campaign not found: ${campaign}` });
+    }
+
+    // Generate S3 key for final flush chunk
+    const chunkTimestamp = timestamp || Date.now();
+    const randomSuffix = uuidv4().substring(0, 8);
+    const s3Key = `recordings/${campaignRecord.id}/${sessionId}/${chunkTimestamp}_flush_${randomSuffix}.json`;
+
+    // Prepare data (plain JSON, no gzip - keep it simple for final flush)
+    const sessionData = JSON.stringify({
+      sessionId,
+      events,
+      pageUrl,
+      timestamp: chunkTimestamp,
+      isFinalFlush: true
+    });
+
+    // Upload to S3 (async, but we respond immediately for sendBeacon)
+    s3.upload({
+      Bucket: bucketName,
+      Key: s3Key,
+      Body: sessionData,
+      ContentType: "application/json"
+    }).promise().then(() => {
+      console.log(`🚪 Final flush uploaded: ${sessionId} (${events.length} events)`);
+    }).catch(err => {
+      console.error(`🚨 Final flush S3 error for ${sessionId}:`, err.message);
+    });
+
+    // Record in DB immediately (fire-and-forget for sendBeacon response speed)
+    db.query(`
+      INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId])
+      .catch(err => console.error(`[DB] Flush chunk insert error: ${err.message}`));
+
+    console.log(`🚪 Final flush received: ${sessionId} (${events.length} events, seq: ${seqId})`);
+
+    // Respond immediately (sendBeacon doesn't wait for response anyway)
+    res.status(202).json({ accepted: true });
+  } catch (err) {
+    console.error("Error in POST /api/sessions/:sessionId/flush:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Search sessions by email (auth required, MUST be before :session_id route)
-app.get("/api/sessions/search", authenticateJWT, (req, res) => {
+app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
   try {
     const { email } = req.query;
 
@@ -815,7 +766,7 @@ app.get("/api/sessions/search", authenticateJWT, (req, res) => {
       return res.status(400).json({ error: "Email query parameter required" });
     }
 
-    const query = `
+    const { rows: sessions } = await db.query(`
       SELECT
         sc.session_id,
         sc.distinct_id,
@@ -833,17 +784,15 @@ app.get("/api/sessions/search", authenticateJWT, (req, res) => {
       LEFT JOIN sessions s ON sc.session_id = s.session_id
       JOIN aliases a ON sc.distinct_id = a.distinct_id
       JOIN users u ON a.user_id = u.id
-      WHERE u.email LIKE ?
-      GROUP BY sc.session_id
+      WHERE u.email LIKE $1
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, s.status, s.watched, s.watched_at
       ORDER BY first_timestamp DESC
-    `;
-
-    const sessions = db.prepare(query).all(`%${email}%`);
+    `, [`%${email}%`]);
 
     const transformedSessions = sessions.map(session => ({
       ...session,
       status: session.status || "dropped_off",
-      watched: session.watched === 1,
+      watched: session.watched === true,
       playback_url: `/api/sessions/${session.session_id}/playback`
     }));
 
@@ -855,7 +804,7 @@ app.get("/api/sessions/search", authenticateJWT, (req, res) => {
 });
 
 // List sessions (auth required)
-app.get("/api/sessions", authenticateJWT, (req, res) => {
+app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
     const { campaign_id, campaign, email, status } = req.query;
 
@@ -868,8 +817,8 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
       return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
     }
 
-    let sessions = [];
     let params = [];
+    let paramIndex = 1;
 
     // Build query based on filters
     let baseQuery = `
@@ -901,20 +850,20 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
       JOIN aliases a ON sc.distinct_id = a.distinct_id
       JOIN users u ON a.user_id = u.id
       `;
-      whereClauses.push("u.email = ?");
+      whereClauses.push(`u.email = $${paramIndex++}`);
       params.push(email);
     }
 
     if (campaign_id || campaign) {
       let cid = campaign_id;
       if (campaign && !campaign_id) {
-        const c = getCampaignByName.get(campaign);
+        const c = await db.queryOne("SELECT id, name FROM campaigns WHERE name = $1", [campaign]);
         if (!c) {
           return res.status(404).json({ error: "Campaign not found" });
         }
         cid = c.id;
       }
-      whereClauses.push("sc.campaign_id = ?");
+      whereClauses.push(`sc.campaign_id = $${paramIndex++}`);
       params.push(cid);
     }
 
@@ -923,7 +872,7 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
         // dropped_off = no status set OR explicitly set to dropped_off
         whereClauses.push("(s.status IS NULL OR s.status = 'dropped_off')");
       } else {
-        whereClauses.push("s.status = ?");
+        whereClauses.push(`s.status = $${paramIndex++}`);
         params.push(status);
       }
     }
@@ -933,20 +882,20 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
     }
 
     baseQuery += `
-      GROUP BY sc.session_id
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index
       ORDER BY first_timestamp DESC
     `;
 
-    sessions = db.prepare(baseQuery).all(...params);
+    const { rows: sessions } = await db.query(baseQuery, params);
 
     // Add playback_url, normalize status, and get email for each session
-    const transformedSessions = sessions.map(session => {
+    const transformedSessions = await Promise.all(sessions.map(async (session) => {
       // Get email if linked
-      const emailResult = db.prepare(`
+      const emailResult = await db.queryOne(`
         SELECT u.email FROM aliases a
         JOIN users u ON a.user_id = u.id
-        WHERE a.distinct_id = ?
-      `).get(session.distinct_id);
+        WHERE a.distinct_id = $1
+      `, [session.distinct_id]);
 
       // Resolve furthest_step_index to key string
       let furthest_step_key = null;
@@ -965,12 +914,12 @@ app.get("/api/sessions", authenticateJWT, (req, res) => {
       return {
         ...sessionData,
         status: session.status || "dropped_off",
-        watched: session.watched === 1,
+        watched: session.watched === true,
         email: emailResult?.email || null,
         playback_url: `/api/sessions/${session.session_id}/playback`,
         furthest_step_key
       };
-    });
+    }));
 
     res.json({ sessions: transformedSessions });
   } catch (err) {
@@ -991,15 +940,17 @@ app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) 
       return res.json(cached);
     }
 
-    // Get all chunks for this session
-    const query = `
+    // Get all chunks for this session, ordered by sequence_id (with timestamp fallback)
+    const { rows: chunks } = await db.query(`
       SELECT sc.*, c.name as campaign_name
       FROM session_chunks sc
       LEFT JOIN campaigns c ON sc.campaign_id = c.id
-      WHERE sc.session_id = ?
-      ORDER BY sc.timestamp ASC
-    `;
-    const chunks = db.prepare(query).all(session_id);
+      WHERE sc.session_id = $1
+      ORDER BY
+        CASE WHEN sc.sequence_id IS NULL THEN 1 ELSE 0 END,
+        sc.sequence_id ASC,
+        sc.timestamp ASC
+    `, [session_id]);
 
     if (chunks.length === 0) {
       return res.status(404).json({ error: "Session not found" });
@@ -1021,7 +972,24 @@ app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) 
           Bucket: chunk.s3_bucket,
           Key: chunk.s3_key
         }).promise();
-        return JSON.parse(s3Response.Body.toString("utf8"));
+
+        // Handle both gzipped (.json.gz) and plain JSON files
+        let jsonString;
+        if (chunk.s3_key.endsWith('.gz')) {
+          // Decompress gzipped content (async)
+          const decompressed = await new Promise((resolve, reject) => {
+            zlib.gunzip(s3Response.Body, (err, result) => {
+              if (err) reject(err);
+              else resolve(result);
+            });
+          });
+          jsonString = decompressed.toString("utf8");
+        } else {
+          // Legacy plain JSON
+          jsonString = s3Response.Body.toString("utf8");
+        }
+
+        return JSON.parse(jsonString);
       } catch (s3Err) {
         console.error(`Error fetching chunk from S3 (${chunk.s3_bucket}/${chunk.s3_key}):`, s3Err.message);
         return null;
@@ -1078,11 +1046,11 @@ app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) 
 });
 
 // Get single session (auth required)
-app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
+app.get("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
-    const query = `
+    const session = await db.queryOne(`
       SELECT
         sc.session_id,
         sc.distinct_id,
@@ -1105,23 +1073,21 @@ app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
       FROM session_chunks sc
       LEFT JOIN campaigns c ON sc.campaign_id = c.id
       LEFT JOIN sessions s ON sc.session_id = s.session_id
-      WHERE sc.session_id = ?
-      GROUP BY sc.session_id
-    `;
+      WHERE sc.session_id = $1
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.ai_evidence, s.ai_last_step, s.ai_progress, s.furthest_step_index
+    `, [session_id]);
 
-    const session = db.prepare(query).get(session_id);
     if (!session) {
       return res.status(404).json({ error: "Session not found" });
     }
 
     // Get user email if linked
-    const emailQuery = `
+    const emailResult = await db.queryOne(`
       SELECT u.email
       FROM aliases a
       JOIN users u ON a.user_id = u.id
-      WHERE a.distinct_id = ?
-    `;
-    const emailResult = db.prepare(emailQuery).get(session.distinct_id);
+      WHERE a.distinct_id = $1
+    `, [session.distinct_id]);
 
     // Resolve furthest_step_index to key string
     let furthest_step_key = null;
@@ -1142,7 +1108,7 @@ app.get("/api/sessions/:session_id", authenticateJWT, (req, res) => {
       email: emailResult?.email || null,
       status: session.status || "dropped_off",
       assets_status: session.assets_status || "raw",
-      watched: session.watched === 1,
+      watched: session.watched === true,
       playback_url: `/api/sessions/${session.session_id}/playback`,
       furthest_step_key
     });
@@ -1158,7 +1124,10 @@ app.delete("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
     const { session_id } = req.params;
 
     // Check if session exists and get S3 info
-    const chunks = db.prepare("SELECT s3_key, s3_bucket FROM session_chunks WHERE session_id = ?").all(session_id);
+    const { rows: chunks } = await db.query(
+      "SELECT s3_key, s3_bucket FROM session_chunks WHERE session_id = $1",
+      [session_id]
+    );
     if (chunks.length === 0) {
       return res.status(404).json({ error: "Session not found" });
     }
@@ -1179,10 +1148,10 @@ app.delete("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
     }
 
     // Delete from session_chunks
-    db.prepare("DELETE FROM session_chunks WHERE session_id = ?").run(session_id);
+    await db.query("DELETE FROM session_chunks WHERE session_id = $1", [session_id]);
 
     // Delete from sessions (status)
-    db.prepare("DELETE FROM sessions WHERE session_id = ?").run(session_id);
+    await db.query("DELETE FROM sessions WHERE session_id = $1", [session_id]);
 
     // Invalidate cache
     sessionCache.del(session_id);
@@ -1196,22 +1165,23 @@ app.delete("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
 });
 
 // Mark session as watched (auth required)
-app.post("/api/sessions/:session_id/watched", authenticateJWT, (req, res) => {
+app.post("/api/sessions/:session_id/watched", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
     // Check if session exists in chunks
-    const chunk = db.prepare("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1").get(session_id);
+    const chunk = await db.queryOne("SELECT 1 FROM session_chunks WHERE session_id = $1 LIMIT 1", [session_id]);
     if (!chunk) {
       return res.status(404).json({ error: "Session not found" });
     }
 
     // Upsert watched status
-    db.prepare(`
+    const now = Date.now();
+    await db.query(`
       INSERT INTO sessions (session_id, watched, watched_at, updated_at)
-      VALUES (?, 1, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET watched = 1, watched_at = excluded.watched_at, updated_at = excluded.updated_at
-    `).run(session_id, Date.now(), Date.now());
+      VALUES ($1, true, $2, $3)
+      ON CONFLICT(session_id) DO UPDATE SET watched = true, watched_at = EXCLUDED.watched_at, updated_at = EXCLUDED.updated_at
+    `, [session_id, now, now]);
 
     console.log(`👁️  Session marked as watched: ${session_id}`);
     res.json({ success: true, session_id, watched: true });
@@ -1222,7 +1192,7 @@ app.post("/api/sessions/:session_id/watched", authenticateJWT, (req, res) => {
 });
 
 // Set session status (domain token required)
-app.post("/api/sessions/:session_id/status", validateDomainToken, (req, res) => {
+app.post("/api/sessions/:session_id/status", validateDomainToken, async (req, res) => {
   try {
     const { session_id } = req.params;
     const { status } = req.body;
@@ -1232,17 +1202,22 @@ app.post("/api/sessions/:session_id/status", validateDomainToken, (req, res) => 
     }
 
     // Upsert session status
-    upsertSessionStatus.run(session_id, status, Date.now());
+    const now = Date.now();
+    await db.query(`
+      INSERT INTO sessions (session_id, status, updated_at)
+      VALUES ($1, $2, $3)
+      ON CONFLICT(session_id) DO UPDATE SET status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
+    `, [session_id, status, now]);
 
     // Handle assets based on status
     let assetsStatus;
     if (status === 'dropped_off') {
       // Auto-queue for video generation
-      queue.addJob(session_id, db);
+      await queue.addJob(session_id);
       assetsStatus = 'queued';
     } else {
       // Completed sessions stay raw (save cost)
-      db.prepare("UPDATE sessions SET assets_status = 'raw' WHERE session_id = ?").run(session_id);
+      await db.query("UPDATE sessions SET assets_status = 'raw' WHERE session_id = $1", [session_id]);
       assetsStatus = 'raw';
     }
 
@@ -1256,7 +1231,7 @@ app.post("/api/sessions/:session_id/status", validateDomainToken, (req, res) => 
 
 // Track funnel checkpoint (domain token required)
 // Called by frontend SDK when user reaches a funnel step
-app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, (req, res) => {
+app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, async (req, res) => {
   try {
     const { session_id } = req.params;
     const { key } = req.body;
@@ -1266,20 +1241,20 @@ app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, (req, res)
     }
 
     // 1. Find campaign via first chunk (efficient)
-    const chunk = db.prepare(`
+    const chunk = await db.queryOne(`
       SELECT campaign_id FROM session_chunks
-      WHERE session_id = ?
+      WHERE session_id = $1
       LIMIT 1
-    `).get(session_id);
+    `, [session_id]);
 
     if (!chunk) {
       return res.sendStatus(404);
     }
 
     // 2. Get funnel config from campaign
-    const campaign = db.prepare(`
-      SELECT funnel_config FROM campaigns WHERE id = ?
-    `).get(chunk.campaign_id);
+    const campaign = await db.queryOne(`
+      SELECT funnel_config FROM campaigns WHERE id = $1
+    `, [chunk.campaign_id]);
 
     if (!campaign || !campaign.funnel_config) {
       return res.sendStatus(200); // No funnel configured, silently accept
@@ -1294,19 +1269,19 @@ app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, (req, res)
     }
 
     // 4. Get current progress (handle missing session row)
-    const session = db.prepare(`
-      SELECT furthest_step_index FROM sessions WHERE session_id = ?
-    `).get(session_id);
+    const session = await db.queryOne(`
+      SELECT furthest_step_index FROM sessions WHERE session_id = $1
+    `, [session_id]);
     const currentIndex = session?.furthest_step_index ?? -1;
 
     // 5. Update only if advancing deeper into funnel ("high score" rule)
     if (stepIndex > currentIndex) {
-      db.prepare(`
+      await db.query(`
         INSERT INTO sessions (session_id, furthest_step_index)
-        VALUES (?, ?)
+        VALUES ($1, $2)
         ON CONFLICT(session_id) DO UPDATE
-        SET furthest_step_index = excluded.furthest_step_index
-      `).run(session_id, stepIndex);
+        SET furthest_step_index = EXCLUDED.furthest_step_index
+      `, [session_id, stepIndex]);
 
       console.log(`📍 Checkpoint: ${session_id} advanced to step ${stepIndex} (${config[stepIndex].name})`);
     }
@@ -1319,15 +1294,15 @@ app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, (req, res)
 });
 
 // Manually trigger video generation for a session (auth required)
-app.post("/api/sessions/:session_id/generate-assets", authenticateJWT, (req, res) => {
+app.post("/api/sessions/:session_id/generate-assets", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
     // Check if session exists
-    const session = db.prepare("SELECT session_id, assets_status FROM sessions WHERE session_id = ?").get(session_id);
+    const session = await db.queryOne("SELECT session_id, assets_status FROM sessions WHERE session_id = $1", [session_id]);
     if (!session) {
       // Check if chunks exist
-      const chunk = db.prepare("SELECT 1 FROM session_chunks WHERE session_id = ? LIMIT 1").get(session_id);
+      const chunk = await db.queryOne("SELECT 1 FROM session_chunks WHERE session_id = $1 LIMIT 1", [session_id]);
       if (!chunk) {
         return res.status(404).json({ error: "Session not found" });
       }
@@ -1345,7 +1320,7 @@ app.post("/api/sessions/:session_id/generate-assets", authenticateJWT, (req, res
     }
 
     // Queue for processing
-    queue.addJob(session_id, db);
+    await queue.addJob(session_id);
     console.log(`🎬 Manual video generation queued: ${session_id}`);
     res.json({ success: true, session_id, assets_status: 'queued' });
   } catch (err) {
@@ -1360,13 +1335,13 @@ app.get("/api/sessions/:session_id/assets", authenticateJWT, async (req, res) =>
     const { session_id } = req.params;
 
     // Get session with asset info
-    const session = db.prepare(`
+    const session = await db.queryOne(`
       SELECT s.session_id, s.assets_status, s.video_s3_key, s.timeline_s3_key, sc.s3_bucket
       FROM sessions s
       LEFT JOIN session_chunks sc ON s.session_id = sc.session_id
-      WHERE s.session_id = ?
+      WHERE s.session_id = $1
       LIMIT 1
-    `).get(session_id);
+    `, [session_id]);
 
     if (!session) {
       return res.status(404).json({ error: "Session not found" });
@@ -1417,16 +1392,16 @@ app.get("/api/sessions/:session_id/assets", authenticateJWT, async (req, res) =>
 });
 
 // Get session AI analysis result (auth required)
-app.get("/api/sessions/:session_id/ai-result", authenticateJWT, (req, res) => {
+app.get("/api/sessions/:session_id/ai-result", authenticateJWT, async (req, res) => {
   try {
     const { session_id } = req.params;
 
     // Get session with AI diagnosis
-    const session = db.prepare(`
+    const session = await db.queryOne(`
       SELECT session_id, ai_diagnosis, ai_evidence, ai_last_step, ai_progress
       FROM sessions
-      WHERE session_id = ?
-    `).get(session_id);
+      WHERE session_id = $1
+    `, [session_id]);
 
     if (!session) {
       return res.status(404).json({ error: "Session not found" });
@@ -1459,18 +1434,18 @@ app.get("/api/sessions/:session_id/ai-result", authenticateJWT, (req, res) => {
 });
 
 // Get AI analysis readiness for a campaign (auth required)
-app.get("/api/campaigns/:id/ai-status", authenticateJWT, (req, res) => {
+app.get("/api/campaigns/:id/ai-status", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
 
     // Verify campaign exists
-    const campaign = getCampaignById.get(id);
+    const campaign = await db.queryOne("SELECT id, name FROM campaigns WHERE id = $1", [id]);
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
 
     // Count sessions by assets_status for this campaign
-    const stats = db.prepare(`
+    const stats = await db.queryOne(`
       SELECT
         COUNT(DISTINCT s.session_id) as total,
         COUNT(DISTINCT CASE WHEN s.assets_status = 'ready' THEN s.session_id END) as ready,
@@ -1482,25 +1457,25 @@ app.get("/api/campaigns/:id/ai-status", authenticateJWT, (req, res) => {
         COUNT(DISTINCT CASE WHEN s.status = 'completed' THEN s.session_id END) as completed
       FROM sessions s
       JOIN session_chunks sc ON s.session_id = sc.session_id
-      WHERE sc.campaign_id = ?
-    `).get(id);
+      WHERE sc.campaign_id = $1
+    `, [id]);
 
     res.json({
       campaign_id: parseInt(id),
       campaign_name: campaign.name,
       sessions: {
-        total: stats.total || 0,
-        dropped_off: stats.dropped_off || 0,
-        completed: stats.completed || 0
+        total: parseInt(stats.total) || 0,
+        dropped_off: parseInt(stats.dropped_off) || 0,
+        completed: parseInt(stats.completed) || 0
       },
       assets: {
-        ready: stats.ready || 0,
-        queued: stats.queued || 0,
-        processing: stats.processing || 0,
-        raw: stats.raw || 0,
-        failed: stats.failed || 0
+        ready: parseInt(stats.ready) || 0,
+        queued: parseInt(stats.queued) || 0,
+        processing: parseInt(stats.processing) || 0,
+        raw: parseInt(stats.raw) || 0,
+        failed: parseInt(stats.failed) || 0
       },
-      ai_ready: stats.ready || 0
+      ai_ready: parseInt(stats.ready) || 0
     });
   } catch (err) {
     console.error("Error in GET /api/campaigns/:id/ai-status:", err);
@@ -1522,9 +1497,9 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
     }
 
     // Verify campaign exists and get its mission brief
-    const campaign = db.prepare(`
-      SELECT id, name, created_at, mission_brief FROM campaigns WHERE id = ?
-    `).get(campaignId);
+    const campaign = await db.queryOne(`
+      SELECT id, name, created_at, mission_brief FROM campaigns WHERE id = $1
+    `, [campaignId]);
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
@@ -1537,15 +1512,15 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
     }
 
     // Find ONE completed session to use as the Golden Path
-    const goldenSession = db.prepare(`
+    const goldenSession = await db.queryOne(`
       SELECT DISTINCT s.session_id
       FROM sessions s
       JOIN session_chunks sc ON s.session_id = sc.session_id
-      WHERE sc.campaign_id = ?
+      WHERE sc.campaign_id = $1
         AND s.status = 'completed'
       ORDER BY s.updated_at DESC
       LIMIT 1
-    `).get(campaignId);
+    `, [campaignId]);
 
     if (!goldenSession) {
       return res.status(400).json({
@@ -1554,7 +1529,7 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
     }
 
     // Find ALL drop-off sessions with ready assets (include bucket per session)
-    const dropOffSessions = db.prepare(`
+    const { rows: dropOffSessions } = await db.query(`
       SELECT DISTINCT
         s.session_id,
         s.timeline_s3_key,
@@ -1562,10 +1537,10 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
         sc.s3_bucket as bucket
       FROM sessions s
       JOIN session_chunks sc ON s.session_id = sc.session_id
-      WHERE sc.campaign_id = ?
+      WHERE sc.campaign_id = $1
         AND s.status = 'dropped_off'
         AND s.assets_status = 'ready'
-    `).all(campaignId);
+    `, [campaignId]);
 
     if (dropOffSessions.length === 0) {
       return res.status(400).json({
@@ -1574,7 +1549,7 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
     }
 
     // Mark campaign as analyzing
-    db.prepare("UPDATE campaigns SET ai_analysis_status = 'analyzing' WHERE id = ?").run(campaignId);
+    await db.query("UPDATE campaigns SET ai_analysis_status = 'analyzing' WHERE id = $1", [campaignId]);
 
     // Respond immediately - analysis runs in background
     res.json({
@@ -1682,41 +1657,39 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
         );
 
         // Step 6: Save per-session AI diagnoses
-        const updateSessionDiagnosis = db.prepare(`
-          UPDATE sessions
-          SET ai_diagnosis = ?, ai_evidence = ?, ai_last_step = ?, ai_progress = ?
-          WHERE session_id = ?
-        `);
-
         for (const analysis of analyses) {
           if (analysis.session_id && !analysis.error) {
-            updateSessionDiagnosis.run(
+            await db.query(`
+              UPDATE sessions
+              SET ai_diagnosis = $1, ai_evidence = $2, ai_last_step = $3, ai_progress = $4
+              WHERE session_id = $5
+            `, [
               analysis.category || null,
               analysis.evidence || null,
               analysis.last_step_name || null,
               analysis.progress_percentage || null,
               analysis.session_id
-            );
+            ]);
             console.log(`[AI] Saved diagnosis for session: ${analysis.session_id} -> ${analysis.category}`);
           }
         }
 
         // Step 7: Save report and generated rubric to database
-        db.prepare(`
+        await db.query(`
           UPDATE campaigns
-          SET ai_report = ?, generated_rubric = ?, ai_analysis_status = 'complete'
-          WHERE id = ?
-        `).run(report, JSON.stringify(rubric), campaignId);
+          SET ai_report = $1, generated_rubric = $2, ai_analysis_status = 'complete'
+          WHERE id = $3
+        `, [report, JSON.stringify(rubric), campaignId]);
 
         console.log(`[AI] Analysis complete for campaign: ${campaign.name} (${analyses.length} sessions diagnosed)`);
 
       } catch (err) {
         console.error(`[AI] Analysis failed for campaign ${campaignId}:`, err);
-        db.prepare(`
+        await db.query(`
           UPDATE campaigns
           SET ai_analysis_status = 'failed'
-          WHERE id = ?
-        `).run(campaignId);
+          WHERE id = $1
+        `, [campaignId]);
       }
     })();
 
@@ -1728,15 +1701,15 @@ app.post("/api/campaigns/:id/analyze", authenticateJWT, async (req, res) => {
 
 
 // Get AI analysis report for a campaign
-app.get("/api/campaigns/:id/report", authenticateJWT, (req, res) => {
+app.get("/api/campaigns/:id/report", authenticateJWT, async (req, res) => {
   try {
     const campaignId = parseInt(req.params.id);
 
-    const result = db.prepare(`
+    const result = await db.queryOne(`
       SELECT name, mission_brief, generated_rubric, ai_report, ai_analysis_status
       FROM campaigns
-      WHERE id = ?
-    `).get(campaignId);
+      WHERE id = $1
+    `, [campaignId]);
 
     if (!result) {
       return res.status(404).json({ error: "Campaign not found" });
@@ -1792,7 +1765,7 @@ app.post("/upload-session", async (req, res) => {
       return res.status(400).json({ error: "Missing campaign name" });
     }
 
-    const campaignRecord = getCampaignByName.get(campaign);
+    const campaignRecord = await db.queryOne("SELECT id, name FROM campaigns WHERE name = $1", [campaign]);
     if (!campaignRecord) {
       console.log(`❌ Campaign not found: ${campaign}`);
       return res.status(404).json({ error: `Campaign not found: ${campaign}` });
@@ -1841,16 +1814,11 @@ app.post("/upload-session", async (req, res) => {
       console.log(`📊 Events captured: ${events.length}`);
       console.log(`🌐 Page URL: ${pageUrl}`);
 
-      // Write to SQLite after successful S3 upload
-      insertSessionChunk.run(
-        sessionId,
-        distinctId,
-        campaignRecord.id,
-        s3Key,
-        bucketName,
-        pageUrl,
-        timestamp
-      );
+      // Write to PostgreSQL after successful S3 upload
+      await db.query(`
+        INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl, timestamp]);
       console.log(`📇 Indexed session chunk: ${sessionId} -> campaign:${campaign}`);
 
       res.json({ success: true, s3_key: s3Key });
@@ -1868,7 +1836,7 @@ app.post("/upload-session", async (req, res) => {
 // IDENTIFY ENDPOINT
 // =====================================================
 
-app.post("/identify", validateDomainToken, (req, res) => {
+app.post("/identify", validateDomainToken, async (req, res) => {
   try {
     const { email, distinctId } = req.body;
     if (!email || !distinctId) {
@@ -1880,13 +1848,22 @@ app.post("/identify", validateDomainToken, (req, res) => {
       return res.status(400).json({ error: "Invalid email format" });
     }
 
-    insertUser.run(email);
-    const user = getUserByEmail.get(email);
+    // Insert user (upsert - ignore if exists)
+    await db.query(
+      "INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO NOTHING",
+      [email]
+    );
+
+    const user = await db.queryOne("SELECT id, email FROM users WHERE email = $1", [email]);
     if (!user) {
       return res.status(500).json({ error: "Failed to retrieve user ID" });
     }
 
-    insertAlias.run(distinctId, user.id);
+    // Insert alias (upsert - update user_id if exists)
+    await db.query(
+      "INSERT INTO aliases (distinct_id, user_id) VALUES ($1, $2) ON CONFLICT (distinct_id) DO UPDATE SET user_id = EXCLUDED.user_id",
+      [distinctId, user.id]
+    );
 
     console.log(`🔗 Identity linked: ${distinctId} -> ${email}`);
     res.json({ success: true, message: "Identity linked successfully" });
@@ -1900,34 +1877,42 @@ app.post("/identify", validateDomainToken, (req, res) => {
 // STATS ENDPOINT
 // =====================================================
 
-app.get("/api/stats", authenticateJWT, (req, res) => {
+app.get("/api/stats", authenticateJWT, async (req, res) => {
   try {
-    const totalCampaigns = db.prepare("SELECT COUNT(*) as count FROM campaigns").get().count;
-    const totalSessions = db.prepare("SELECT COUNT(DISTINCT session_id) as count FROM session_chunks").get().count;
-    const totalUsers = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
+    const totalCampaignsResult = await db.queryOne("SELECT COUNT(*) as count FROM campaigns");
+    const totalSessionsResult = await db.queryOne("SELECT COUNT(DISTINCT session_id) as count FROM session_chunks");
+    const totalUsersResult = await db.queryOne("SELECT COUNT(*) as count FROM users");
 
-    const completedSessions = db.prepare(`
+    const completedSessionsResult = await db.queryOne(`
       SELECT COUNT(*) as count FROM sessions WHERE status = 'completed'
-    `).get().count;
+    `);
 
-    const droppedSessions = db.prepare(`
+    const droppedSessionsResult = await db.queryOne(`
       SELECT COUNT(DISTINCT sc.session_id) as count
       FROM session_chunks sc
       LEFT JOIN sessions s ON sc.session_id = s.session_id
       WHERE s.status IS NULL OR s.status = 'dropped_off'
-    `).get().count;
+    `);
 
     // Sessions in last 24 hours
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-    const sessionsLast24h = db.prepare(`
-      SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE timestamp > ?
-    `).get(oneDayAgo).count;
+    const sessionsLast24hResult = await db.queryOne(`
+      SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE timestamp > $1
+    `, [oneDayAgo]);
 
     // Sessions in last 7 days
     const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const sessionsLast7d = db.prepare(`
-      SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE timestamp > ?
-    `).get(sevenDaysAgo).count;
+    const sessionsLast7dResult = await db.queryOne(`
+      SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE timestamp > $1
+    `, [sevenDaysAgo]);
+
+    const totalCampaigns = parseInt(totalCampaignsResult?.count) || 0;
+    const totalSessions = parseInt(totalSessionsResult?.count) || 0;
+    const totalUsers = parseInt(totalUsersResult?.count) || 0;
+    const completedSessions = parseInt(completedSessionsResult?.count) || 0;
+    const droppedSessions = parseInt(droppedSessionsResult?.count) || 0;
+    const sessionsLast24h = parseInt(sessionsLast24hResult?.count) || 0;
+    const sessionsLast7d = parseInt(sessionsLast7dResult?.count) || 0;
 
     // Completion rate
     const completionRate = totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0;

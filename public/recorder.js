@@ -1,9 +1,9 @@
-// public/recorder.js - LAZY LOADING VERSION
+// public/recorder.js - DIRECT S3 UPLOAD VERSION
 (function() {
   "use strict";
 
   // Version - check this in console: window.RRWEB_RECORDER_VERSION
-  var VERSION = "1.5.0-advanced-hud";
+  var VERSION = "2.0.0-direct-upload";
   window.RRWEB_RECORDER_VERSION = VERSION;
 
   // Logging utility
@@ -124,6 +124,7 @@
   var timeoutTimer = null;
   var librariesLoaded = false;
   var librariesLoading = false;
+  var chunkSequence = 0; // Sequence ID for chunk ordering (increments on every send)
 
   // Utility: dynamically load external scripts
   function loadScript(src) {
@@ -210,6 +211,7 @@
       localStorage.setItem(SESSION_ID_KEY, newSessionId);
       localStorage.removeItem(EVENTS_KEY);
       events = [];
+      chunkSequence = 0; // Reset sequence for new session
       if (existingSessionId) {
         log("🔄 Session expired (idle > 30min). Created new session: " + newSessionId);
       } else {
@@ -299,7 +301,14 @@
     }, durationMs);
   }
 
-  // Send events to the backend
+  // Get base server URL (without /upload-session path)
+  function getServerBaseUrl() {
+    var url = window.RRWEB_SERVER_URL || "http://localhost:3000/upload-session";
+    return url.replace("/upload-session", "");
+  }
+
+  // Send events to S3 via presigned URL (Direct Upload)
+  // Flow: 1) Request presigned URL from server  2) Upload directly to S3
   function sendEvents() {
     if (events.length === 0) {
       log("📤 No events to send (buffer empty)");
@@ -311,87 +320,137 @@
     }
 
     var eventCount = events.length;
-    log("📤 Sending " + eventCount + " events to server...", {
+    var chunkTimestamp = Date.now();
+    var eventsToSend = events.slice(); // Copy events before clearing
+    var currentSeq = chunkSequence++; // Capture and increment sequence ID
+
+    log("📤 Direct upload: " + eventCount + " events (seq: " + currentSeq + ")", {
       sessionId: sessionId,
-      campaign: currentCampaign,
-      pageUrl: window.location.href
+      campaign: currentCampaign
     });
 
-    var payload = {
-      sessionId: sessionId,
-      distinctId: distinctId,
+    // Step 1: Request presigned URL from server (lightweight request)
+    var baseUrl = getServerBaseUrl();
+    var uploadUrlEndpoint = baseUrl + "/api/sessions/" + sessionId + "/upload-url";
+
+    var ticketPayload = {
+      chunkTimestamp: chunkTimestamp,
       campaign: currentCampaign,
-      events: events,
+      distinctId: distinctId,
       pageUrl: window.location.href,
       host: window.location.host,
-      timestamp: Date.now(),
-      domainToken: DOMAIN_TOKEN
+      domainToken: DOMAIN_TOKEN,
+      sequenceId: currentSeq // Include sequence ID for ordering
     };
-    var url = window.RRWEB_SERVER_URL || "http://localhost:3000/upload-session";
-    var payloadStr = JSON.stringify(payload);
-    var sent = false;
+
+    // Prepare the actual recording data (events only)
+    var recordingData = {
+      sessionId: sessionId,
+      events: eventsToSend,
+      pageUrl: window.location.href,
+      timestamp: chunkTimestamp
+    };
+    var recordingJson = JSON.stringify(recordingData);
 
     // Compress with gzip using fflate
     var compressed = null;
     try {
       if (window.fflate) {
-        compressed = fflate.gzipSync(fflate.strToU8(payloadStr));
-        log("📦 Compressed payload: " + payloadStr.length + " -> " + compressed.length + " bytes");
+        compressed = fflate.gzipSync(fflate.strToU8(recordingJson));
+        log("📦 Compressed: " + recordingJson.length + " -> " + compressed.length + " bytes (" +
+            Math.round((1 - compressed.length / recordingJson.length) * 100) + "% saved)");
       }
     } catch (err) {
-      logWarn("Compression failed, sending uncompressed");
+      logWarn("Compression failed, direct upload requires gzip");
+      return;
     }
+
+    if (!compressed) {
+      logError("fflate not loaded, cannot compress payload");
+      return;
+    }
+
+    // Clear events buffer immediately (optimistic)
+    events = [];
+    saveEvents();
+
+    // Step 1: Get presigned URL
+    fetch(uploadUrlEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ticketPayload),
+      keepalive: true
+    })
+    .then(function(res) {
+      if (!res.ok) {
+        throw new Error("Failed to get upload URL: " + res.status);
+      }
+      return res.json();
+    })
+    .then(function(data) {
+      var uploadUrl = data.uploadUrl;
+      var s3Key = data.s3Key;
+
+      log("🎫 Got presigned URL for: " + s3Key.split("/").pop());
+
+      // Step 2: Upload directly to S3
+      return fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "application/gzip" },
+        body: compressed,
+        keepalive: true
+      }).then(function(s3Res) {
+        if (s3Res.ok) {
+          log("✅ Direct upload complete (" + eventCount + " events -> S3)");
+        } else {
+          throw new Error("S3 upload failed: " + s3Res.status);
+        }
+      });
+    })
+    .catch(function(err) {
+      logError("Direct upload failed: " + err.message);
+      // Events already cleared - they're lost on failure
+      // This is acceptable: better than blocking the main thread
+    });
+  }
+
+  // Final flush for tab close - uses lightweight /flush endpoint
+  // sendBeacon can't do two-step presigned URLs, so we use a dedicated flush endpoint
+  // Plain JSON (no gzip) - final chunks are small anyway
+  function flushEvents() {
+    if (events.length === 0) return;
+    if (!currentCampaign) return;
+    if (!sessionId) return;
+
+    var eventCount = events.length;
+    var currentSeq = chunkSequence++; // Capture and increment sequence ID
+    var baseUrl = getServerBaseUrl();
+    // Append sequence ID to URL (sendBeacon can't send custom JSON with Blob body)
+    var flushUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + currentSeq;
+
+    // Plain JSON payload (no gzip - keep it simple and reliable for tab close)
+    var payload = {
+      events: events,
+      campaign: currentCampaign,
+      distinctId: distinctId,
+      pageUrl: window.location.href,
+      host: window.location.host,
+      timestamp: Date.now(),
+      domainToken: DOMAIN_TOKEN
+    };
 
     try {
       if (navigator.sendBeacon) {
-        if (compressed) {
-          var blob = new Blob([compressed], { type: "text/plain" });
-          sent = navigator.sendBeacon(url + "?compression=gzip", blob);
-        } else {
-          var blob = new Blob([payloadStr], { type: "application/json" });
-          sent = navigator.sendBeacon(url, blob);
-        }
+        var blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+        var sent = navigator.sendBeacon(flushUrl, blob);
         if (sent) {
-          log("✅ Events sent via sendBeacon (" + eventCount + " events)");
+          log("🚪 Final flush sent via sendBeacon (" + eventCount + " events, seq: " + currentSeq + ")");
+        } else {
+          logWarn("sendBeacon returned false");
         }
       }
     } catch (err) {
-      logWarn("sendBeacon failed, falling back to fetch");
-    }
-
-    if (!sent) {
-      log("📡 Sending events via fetch...");
-      if (compressed) {
-        fetch(url + "?compression=gzip", {
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
-          body: compressed,
-          credentials: "include"
-        }).then(function(res) {
-          if (res.ok) {
-            log("✅ Events sent via fetch (" + eventCount + " events)");
-          } else {
-            logError("Server returned error: " + res.status);
-          }
-        }).catch(function(err) {
-          logError("Failed to send events: " + err.message);
-        });
-      } else {
-        fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: payloadStr,
-          credentials: "include"
-        }).then(function(res) {
-          if (res.ok) {
-            log("✅ Events sent via fetch (" + eventCount + " events)");
-          } else {
-            logError("Server returned error: " + res.status);
-          }
-        }).catch(function(err) {
-          logError("Failed to send events: " + err.message);
-        });
-      }
+      // Ignore errors on unload - nothing we can do
     }
 
     events = [];
@@ -925,7 +984,7 @@
         tryResumeRecording();
       });
 
-    // Periodic send + beforeunload
+    // Periodic send (60s interval) - uses direct S3 upload
     setInterval(function() {
       if (isRecordingActive) {
         log("⏰ Periodic flush triggered (60s interval)");
@@ -933,10 +992,28 @@
       }
     }, 60000);
 
+    // Tab close detection - uses lightweight /flush endpoint
+    // visibilitychange is MORE RELIABLE than beforeunload for modern browsers
+    document.addEventListener("visibilitychange", function() {
+      if (document.visibilityState === "hidden" && isRecordingActive) {
+        log("🚪 Tab hidden - flushing final events...");
+        flushEvents();
+      }
+    });
+
+    // Fallback for older browsers that don't fire visibilitychange reliably
     window.addEventListener("beforeunload", function() {
       if (isRecordingActive) {
-        log("🚪 Page unload detected, flushing events...");
-        sendEvents();
+        log("🚪 Page unload - flushing final events...");
+        flushEvents();
+      }
+    });
+
+    // Also catch pagehide for mobile Safari and bfcache scenarios
+    window.addEventListener("pagehide", function() {
+      if (isRecordingActive) {
+        log("🚪 Page hide - flushing final events...");
+        flushEvents();
       }
     });
 
