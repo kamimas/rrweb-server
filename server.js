@@ -159,7 +159,9 @@ app.get("/api/projects/:token/config", async (req, res) => {
         cr.selector,
         cr.action_type,
         c.name as campaign_name,
-        cr.step_key
+        cr.step_key,
+        cr.timeout_ms,
+        cr.completion_status
       FROM campaign_rules cr
       JOIN campaigns c ON cr.campaign_id = c.id
       ORDER BY c.id, cr.id
@@ -193,7 +195,7 @@ app.post("/api/projects/:token/rules", async (req, res) => {
   }
 
   try {
-    const { campaign_id, trigger_type, selector, action_type, step_key } = req.body;
+    const { campaign_id, trigger_type, selector, action_type, step_key, timeout_ms, completion_status } = req.body;
 
     // Validate required fields
     if (!campaign_id || !trigger_type || !selector || !action_type) {
@@ -217,6 +219,11 @@ app.post("/api/projects/:token/rules", async (req, res) => {
       return res.status(400).json({ error: "step_key is required when action_type is LOG_STEP" });
     }
 
+    // Validate completion_status if provided
+    if (completion_status && !['completed', 'dropped_off'].includes(completion_status)) {
+      return res.status(400).json({ error: "completion_status must be 'completed' or 'dropped_off'" });
+    }
+
     // Verify campaign exists
     const campaign = await db.queryOne("SELECT id FROM campaigns WHERE id = $1", [campaign_id]);
     if (!campaign) {
@@ -225,9 +232,9 @@ app.post("/api/projects/:token/rules", async (req, res) => {
 
     // Insert rule
     const result = await db.insert(`
-      INSERT INTO campaign_rules (campaign_id, trigger_type, selector, action_type, step_key, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
-    `, [campaign_id, trigger_type, selector, action_type, step_key || null, Date.now()]);
+      INSERT INTO campaign_rules (campaign_id, trigger_type, selector, action_type, step_key, timeout_ms, completion_status, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
+    `, [campaign_id, trigger_type, selector, action_type, step_key || null, timeout_ms || null, completion_status || null, Date.now()]);
 
     console.log(`🤖 Rule created: ${action_type} on ${selector} for campaign ${campaign_id}`);
 
@@ -262,7 +269,9 @@ app.post("/api/projects/:token/rules", async (req, res) => {
       trigger_type,
       selector,
       action_type,
-      step_key: step_key || null
+      step_key: step_key || null,
+      timeout_ms: timeout_ms || null,
+      completion_status: completion_status || null
     });
   } catch (err) {
     console.error("Error in POST /api/projects/:token/rules:", err);

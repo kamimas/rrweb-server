@@ -627,13 +627,24 @@
       if (rule.action_type === "START_RECORDING") {
         // Only start if we have a campaign name
         if (rule.campaign_name) {
-          window.recorder.startRecording({ campaign: rule.campaign_name });
+          var options = { campaign: rule.campaign_name };
+          // Add timeout if specified in rule
+          if (rule.timeout_ms) {
+            options.timeout = rule.timeout_ms;
+            log("🤖 Starting recording with timeout: " + (rule.timeout_ms / 60000) + " minutes");
+          }
+          window.recorder.startRecording(options);
         } else {
           logWarn("🤖 Cannot start recording: Rule missing campaign_name");
         }
       }
       else if (rule.action_type === "STOP_RECORDING") {
         window.recorder.stopRecording();
+        // Set status if specified in rule
+        if (rule.completion_status) {
+          log("🤖 Setting session status to: " + rule.completion_status);
+          window.recorder.setStatus(rule.completion_status);
+        }
       }
       else if (rule.action_type === "LOG_STEP") {
         if (rule.step_key) {

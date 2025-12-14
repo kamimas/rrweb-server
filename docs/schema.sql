@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS campaign_rules (
     selector TEXT NOT NULL,                       -- CSS selector or URL pattern
     action_type VARCHAR(50) NOT NULL,             -- START_RECORDING, STOP_RECORDING, LOG_STEP
     step_key VARCHAR(255),                        -- Step identifier for LOG_STEP
+    timeout_ms INTEGER,                           -- Recording timeout in milliseconds (for START_RECORDING)
+    completion_status VARCHAR(50),                -- 'completed' or 'dropped_off' (for STOP_RECORDING)
     created_at BIGINT NOT NULL
 );
 

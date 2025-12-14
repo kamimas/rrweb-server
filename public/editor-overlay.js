@@ -456,16 +456,35 @@
     shadow.getElementById('btn-start').onclick = () => {
       const c = getConds();
       if (!c.length) return alert("Select at least one condition");
-      saveRule('START_RECORDING', c);
+      const timeoutInput = prompt("Recording timeout in minutes (leave blank for no timeout):");
+      let timeoutMs = null;
+      if (timeoutInput && timeoutInput.trim()) {
+        const minutes = parseFloat(timeoutInput.trim());
+        if (!isNaN(minutes) && minutes > 0) {
+          timeoutMs = Math.floor(minutes * 60 * 1000);
+        }
+      }
+      saveRule('START_RECORDING', c, null, timeoutMs);
     };
     shadow.getElementById('btn-stop').onclick = () => {
       const c = getConds();
       if (!c.length) return alert("Select at least one condition");
-      saveRule('STOP_RECORDING', c);
+      const status = prompt("Mark session as (type 'completed' or 'dropped_off', or leave blank for no status):");
+      let completionStatus = null;
+      if (status && status.trim()) {
+        const normalized = status.trim().toLowerCase();
+        if (normalized === 'completed' || normalized === 'dropped_off') {
+          completionStatus = normalized;
+        } else {
+          alert("Invalid status. Use 'completed' or 'dropped_off'");
+          return;
+        }
+      }
+      saveRule('STOP_RECORDING', c, null, null, completionStatus);
     };
   }
 
-  function saveRule(action, conditions, key) {
+  function saveRule(action, conditions, key, timeoutMs, completionStatus) {
     if (!TOKEN || !CAMPAIGN_ID) {
       alert("Session Lost. Please close and relaunch the Visual Editor.");
       return;
@@ -478,16 +497,20 @@
 
     console.log("💾 Saving rule:", action, rulePayload);
 
+    const payload = {
+      campaign_id: CAMPAIGN_ID,
+      trigger_type: 'CLICK_ELEMENT',
+      selector: JSON.stringify(rulePayload),
+      action_type: action,
+      step_key: key || null,
+      timeout_ms: timeoutMs || null,
+      completion_status: completionStatus || null
+    };
+
     fetch(`${SERVER_URL}/api/projects/${TOKEN}/rules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        campaign_id: CAMPAIGN_ID,
-        trigger_type: 'CLICK_ELEMENT',
-        selector: JSON.stringify(rulePayload),
-        action_type: action,
-        step_key: key || null
-      })
+      body: JSON.stringify(payload)
     }).then(r => {
       if (r.ok) {
         closeMenu();
