@@ -24,140 +24,257 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    /* SHARED FONTS */
-    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    /* SHARED FONTS - Platform Design System */
+    * {
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
+    }
 
     /* HIGHLIGHTER */
     .highlighter {
-      position: fixed; border: 2px solid #ef4444; background: rgba(239, 68, 68, 0.1);
-      pointer-events: none; z-index: 2147483646; display: none; border-radius: 4px;
+      position: fixed;
+      border: 2px solid hsl(0 72% 51%);
+      background: hsl(0 72% 51% / 0.1);
+      pointer-events: none;
+      z-index: 2147483646;
+      display: none;
+      border-radius: 1.5rem;
     }
 
-    /* CONTROL BAR (Bottom) */
+    /* CONTROL BAR (Bottom) - Glass Morphism */
     .control-bar {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-      background: #1f2937; color: white; padding: 8px 16px; border-radius: 30px;
-      z-index: 2147483647; display: flex; gap: 12px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      background: hsl(220 14% 12% / 0.7);
+      backdrop-filter: blur(20px);
+      border: 1px solid hsl(220 14% 20% / 0.5);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 30px;
+      z-index: 2147483647;
+      display: flex;
+      gap: 12px;
+      box-shadow: 0 8px 32px hsl(0 0% 0% / 0.3);
     }
     .toggle-btn {
-      background: transparent; border: none; color: #9ca3af; padding: 6px 12px;
-      border-radius: 20px; cursor: pointer; font-weight: 600; font-size: 14px;
-      transition: all 0.15s;
+      background: transparent;
+      border: none;
+      color: hsl(220 10% 60%);
+      padding: 6px 12px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 14px;
+      transition: all 0.2s;
     }
     .toggle-btn:hover:not(.active) { color: white; }
-    .toggle-btn.active { background: white; color: #1f2937; }
+    .toggle-btn.active {
+      background: white;
+      color: hsl(220 14% 12%);
+    }
 
-    /* HUD SIDEBAR (Top Left) */
+    /* HUD SIDEBAR (Top Left) - Glass Morphism */
     .campaign-hud {
-      position: fixed; top: 20px; left: 20px; width: 280px;
-      background: white; border-radius: 12px; border: 1px solid #e5e7eb;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15);
-      z-index: 2147483647; display: flex; flex-direction: column;
-      max-height: 70vh; transition: all 0.2s ease;
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      width: 280px;
+      background: hsl(220 14% 12% / 0.7);
+      backdrop-filter: blur(20px);
+      border-radius: 1.5rem;
+      border: 1px solid hsl(220 14% 20% / 0.5);
+      box-shadow: 0 8px 32px hsl(0 0% 0% / 0.3);
+      z-index: 2147483647;
+      display: flex;
+      flex-direction: column;
+      max-height: 70vh;
+      transition: all 0.3s ease;
       overflow: hidden;
     }
     .campaign-hud.minimized {
-      width: 48px; height: 48px; border-radius: 50%;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
       cursor: pointer;
     }
     .hud-header {
-      padding: 12px 16px; background: linear-gradient(135deg, #1f2937, #374151);
-      color: white; font-weight: 700; font-size: 13px;
-      display: flex; justify-content: space-between; align-items: center;
-      border-radius: 12px 12px 0 0;
+      padding: 12px 16px;
+      background: hsl(220 14% 12%);
+      color: white;
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: -0.5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-radius: 1.5rem 1.5rem 0 0;
     }
     .minimized .hud-header {
-      padding: 0; justify-content: center; align-items: center;
-      height: 100%; border-radius: 50%;
+      padding: 0;
+      justify-content: center;
+      align-items: center;
+      height: 100%;
+      border-radius: 50%;
     }
-    .hud-title { display: flex; align-items: center; gap: 8px; }
+    .hud-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .minimized .hud-title span:last-child { display: none; }
 
     .hud-controls { display: flex; gap: 8px; }
     .hud-controls span {
-      cursor: pointer; padding: 4px 6px; font-size: 14px;
-      border-radius: 4px; transition: background 0.15s;
+      cursor: pointer;
+      padding: 4px 6px;
+      font-size: 14px;
+      border-radius: 1.5rem;
+      transition: background 0.2s;
     }
-    .hud-controls span:hover { background: rgba(255,255,255,0.15); }
+    .hud-controls span:hover { background: hsl(220 14% 20% / 0.5); }
     .minimized .hud-controls { display: none; }
 
     .hud-content { overflow-y: auto; flex: 1; }
     .minimized .hud-content { display: none; }
 
-    .hud-section { border-bottom: 1px solid #f3f4f6; }
+    .hud-section { border-bottom: 1px solid hsl(220 14% 18%); }
     .hud-section:last-child { border-bottom: none; }
     .hud-label {
-      font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
-      color: #9ca3af; padding: 10px 14px 6px 14px;
-      display: flex; align-items: center; gap: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: -0.5px;
+      color: hsl(220 10% 60%);
+      padding: 10px 14px 6px 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
     .hud-count {
-      background: #e5e7eb; color: #374151; padding: 1px 6px;
-      border-radius: 10px; font-size: 10px; font-weight: 700;
+      background: hsl(220 14% 20%);
+      color: white;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-weight: 700;
     }
     .hud-item {
-      padding: 8px 14px; font-size: 12px; color: #374151;
-      display: flex; align-items: center; gap: 10px;
-      transition: background 0.15s;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: white;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: background 0.2s;
     }
-    .hud-item:hover { background: #f9fafb; }
+    .hud-item:hover { background: hsl(220 14% 16%); }
     .hud-icon { width: 20px; text-align: center; font-size: 14px; }
     .hud-desc {
-      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       font-weight: 500;
     }
     .hud-empty {
-      padding: 8px 14px; font-style: italic; color: #d1d5db; font-size: 11px;
+      padding: 8px 14px;
+      font-style: italic;
+      color: hsl(220 10% 40%);
+      font-size: 11px;
     }
     .hud-loading, .hud-error {
-      padding: 16px; text-align: center; font-size: 12px;
+      padding: 16px;
+      text-align: center;
+      font-size: 12px;
     }
-    .hud-loading { color: #9ca3af; }
-    .hud-error { color: #ef4444; background: #fef2f2; }
+    .hud-loading { color: hsl(220 10% 60%); }
+    .hud-error {
+      color: hsl(0 72% 51%);
+      background: hsl(0 72% 51% / 0.1);
+    }
 
-    /* MENU (The Popup) */
+    /* MENU (The Popup) - Glass Morphism */
     .editor-menu {
-      position: fixed; background: white; color: #1f2937; padding: 0;
-      border-radius: 12px; box-shadow: 0 20px 40px -5px rgba(0, 0, 0, 0.25);
-      z-index: 2147483648; width: 340px;
-      border: 1px solid #e5e7eb; display: none; overflow: hidden;
+      position: fixed;
+      background: hsl(220 14% 12% / 0.7);
+      backdrop-filter: blur(20px);
+      color: white;
+      padding: 0;
+      border-radius: 1.5rem;
+      box-shadow: 0 8px 32px hsl(0 0% 0% / 0.3);
+      z-index: 2147483648;
+      width: 340px;
+      border: 1px solid hsl(220 14% 20% / 0.5);
+      display: none;
+      overflow: hidden;
     }
     .menu-header {
-      padding: 14px 16px; background: linear-gradient(to right, #f9fafb, #f3f4f6);
-      border-bottom: 1px solid #e5e7eb; font-weight: bold; font-size: 14px;
-      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 16px;
+      background: hsl(220 14% 12%);
+      border-bottom: 1px solid hsl(220 14% 18%);
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: -0.5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
     .menu-close {
-      cursor: pointer; color: #9ca3af; font-size: 18px; padding: 4px;
-      border-radius: 4px; transition: all 0.15s;
+      cursor: pointer;
+      color: hsl(220 10% 60%);
+      font-size: 18px;
+      padding: 4px;
+      border-radius: 1.5rem;
+      transition: all 0.2s;
     }
-    .menu-close:hover { background: #e5e7eb; color: #374151; }
-    .menu-body { padding: 8px 0; max-height: 280px; overflow-y: auto; }
+    .menu-close:hover {
+      background: hsl(220 14% 20%);
+      color: white;
+    }
+    .menu-body {
+      padding: 8px 0;
+      max-height: 280px;
+      overflow-y: auto;
+    }
     .variable-row {
-      display: flex; align-items: flex-start; gap: 10px; padding: 10px 16px;
-      border-bottom: 1px solid #f3f4f6; font-size: 12px;
-      transition: background 0.15s;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 16px;
+      border-bottom: 1px solid hsl(220 14% 18%);
+      font-size: 12px;
+      transition: background 0.2s;
     }
-    .variable-row:hover { background: #fafafa; }
+    .variable-row:hover { background: hsl(220 14% 16%); }
     .variable-row:last-child { border-bottom: none; }
     .variable-row input[type="checkbox"] {
-      margin-top: 2px; cursor: pointer; width: 16px; height: 16px;
-      accent-color: #3b82f6;
+      margin-top: 2px;
+      cursor: pointer;
+      width: 16px;
+      height: 16px;
+      accent-color: hsl(211 100% 60%);
     }
     .var-details { flex: 1; min-width: 0; }
     .var-label {
-      font-size: 10px; font-weight: 700; color: #6b7280;
-      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      color: hsl(220 10% 60%);
+      text-transform: uppercase;
+      letter-spacing: -0.5px;
+      margin-bottom: 4px;
     }
     .var-val {
-      font-family: "SF Mono", Monaco, monospace; font-size: 11px;
-      background: #f3f4f6; padding: 4px 8px; border-radius: 4px;
-      word-break: break-all; color: #111;
+      font-family: "SF Mono", Monaco, monospace;
+      font-size: 11px;
+      background: hsl(220 14% 16%);
+      padding: 4px 8px;
+      border-radius: 1.5rem;
+      word-break: break-all;
+      color: white;
     }
     .config-section {
-      padding: 12px 16px; border-top: 1px solid #e5e7eb;
-      background: #fafbfc;
+      padding: 12px 16px;
+      border-top: 1px solid hsl(220 14% 18%);
+      background: hsl(220 14% 10%);
     }
     .config-group {
       margin-bottom: 12px;
@@ -166,50 +283,84 @@
       margin-bottom: 0;
     }
     .config-label {
-      display: block; font-size: 11px; font-weight: 700;
-      color: #374151; margin-bottom: 8px; text-transform: uppercase;
-      letter-spacing: 0.5px;
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: white;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: -0.5px;
     }
     .config-input {
-      width: 100%; padding: 8px 10px; border: 1px solid #d1d5db;
-      border-radius: 6px; font-size: 13px; font-family: inherit;
-      transition: border-color 0.15s;
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid hsl(220 13% 18%);
+      background: hsl(220 14% 12%);
+      color: white;
+      border-radius: 1.5rem;
+      font-size: 13px;
+      font-family: inherit;
+      transition: all 0.2s;
     }
     .config-input:focus {
-      outline: none; border-color: #3b82f6;
+      outline: none;
+      border-color: hsl(211 100% 60%);
+      box-shadow: 0 0 0 2px hsl(211 100% 60% / 0.2);
     }
     .radio-group {
-      display: flex; flex-direction: column; gap: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
     .radio-option {
-      display: flex; align-items: center; gap: 8px; cursor: pointer;
-      padding: 8px 10px; border-radius: 6px; transition: background 0.15s;
-      font-size: 13px; color: #374151;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      padding: 8px 10px;
+      border-radius: 1.5rem;
+      transition: background 0.2s;
+      font-size: 13px;
+      color: white;
     }
     .radio-option:hover {
-      background: #f3f4f6;
+      background: hsl(220 14% 16%);
     }
     .radio-option input[type="radio"] {
-      cursor: pointer; width: 16px; height: 16px; accent-color: #3b82f6;
+      cursor: pointer;
+      width: 16px;
+      height: 16px;
+      accent-color: hsl(211 100% 60%);
     }
     .action-row {
-      padding: 12px 16px; display: flex; gap: 8px;
-      background: linear-gradient(to right, #f9fafb, #f3f4f6);
-      border-top: 1px solid #e5e7eb;
+      padding: 12px 16px;
+      display: flex;
+      gap: 8px;
+      background: hsl(220 14% 12%);
+      border-top: 1px solid hsl(220 14% 18%);
     }
     button.action-btn {
-      flex: 1; padding: 10px 8px; border: none; border-radius: 8px;
-      cursor: pointer; font-weight: 600; font-size: 12px; color: white;
-      transition: all 0.15s; display: flex; flex-direction: column;
-      align-items: center; gap: 2px;
+      flex: 1;
+      padding: 10px 8px;
+      border: none;
+      border-radius: 1.5rem;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+      color: white;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
     }
     button.action-btn:hover { transform: translateY(-1px); }
     button.action-btn .btn-icon { font-size: 16px; }
     .btn-step { background: #10b981; }
     .btn-step:hover { background: #059669; }
-    .btn-start { background: #3b82f6; }
-    .btn-start:hover { background: #2563eb; }
-    .btn-stop { background: #ef4444; }
+    .btn-start { background: hsl(211 100% 60%); }
+    .btn-start:hover { background: hsl(211 100% 50%); }
+    .btn-stop { background: hsl(0 72% 51%); }
     .btn-stop:hover { background: #dc2626; }
   `;
   shadow.appendChild(style);
