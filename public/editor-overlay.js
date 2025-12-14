@@ -155,6 +155,43 @@
       background: #f3f4f6; padding: 4px 8px; border-radius: 4px;
       word-break: break-all; color: #111;
     }
+    .config-section {
+      padding: 12px 16px; border-top: 1px solid #e5e7eb;
+      background: #fafbfc;
+    }
+    .config-group {
+      margin-bottom: 12px;
+    }
+    .config-group:last-child {
+      margin-bottom: 0;
+    }
+    .config-label {
+      display: block; font-size: 11px; font-weight: 700;
+      color: #374151; margin-bottom: 8px; text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .config-input {
+      width: 100%; padding: 8px 10px; border: 1px solid #d1d5db;
+      border-radius: 6px; font-size: 13px; font-family: inherit;
+      transition: border-color 0.15s;
+    }
+    .config-input:focus {
+      outline: none; border-color: #3b82f6;
+    }
+    .radio-group {
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .radio-option {
+      display: flex; align-items: center; gap: 8px; cursor: pointer;
+      padding: 8px 10px; border-radius: 6px; transition: background 0.15s;
+      font-size: 13px; color: #374151;
+    }
+    .radio-option:hover {
+      background: #f3f4f6;
+    }
+    .radio-option input[type="radio"] {
+      cursor: pointer; width: 16px; height: 16px; accent-color: #3b82f6;
+    }
     .action-row {
       padding: 12px 16px; display: flex; gap: 8px;
       background: linear-gradient(to right, #f9fafb, #f3f4f6);
@@ -411,6 +448,29 @@
         <span class="menu-close" id="btn-x">✕</span>
       </div>
       <div class="menu-body">${rows}</div>
+      <div class="config-section">
+        <div class="config-group" id="config-timeout" style="display:none;">
+          <label class="config-label">⏱️ Recording Timeout (optional)</label>
+          <input type="number" id="input-timeout" class="config-input" placeholder="Minutes (e.g., 20)" min="0" step="1">
+        </div>
+        <div class="config-group" id="config-status" style="display:none;">
+          <label class="config-label">✅ Mark Session As</label>
+          <div class="radio-group">
+            <label class="radio-option">
+              <input type="radio" name="status" value="completed" id="radio-completed">
+              <span>Completed</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="status" value="dropped_off" id="radio-dropped">
+              <span>Dropped Off</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="status" value="" id="radio-none" checked>
+              <span>None</span>
+            </label>
+          </div>
+        </div>
+      </div>
       <div class="action-row">
         <button class="action-btn btn-step" id="btn-step">
           <span class="btn-icon">📍</span>
@@ -447,16 +507,39 @@
       return chk && chk.checked;
     });
 
-    shadow.getElementById('btn-step').onclick = () => {
+    // Show/hide config sections on button hover
+    const configTimeout = shadow.getElementById('config-timeout');
+    const configStatus = shadow.getElementById('config-status');
+    const btnStep = shadow.getElementById('btn-step');
+    const btnStart = shadow.getElementById('btn-start');
+    const btnStop = shadow.getElementById('btn-stop');
+
+    btnStep.onmouseenter = () => {
+      configTimeout.style.display = 'none';
+      configStatus.style.display = 'none';
+    };
+    btnStart.onmouseenter = () => {
+      configTimeout.style.display = 'block';
+      configStatus.style.display = 'none';
+    };
+    btnStop.onmouseenter = () => {
+      configTimeout.style.display = 'none';
+      configStatus.style.display = 'block';
+    };
+
+    btnStep.onclick = () => {
       const c = getConds();
       if (!c.length) return alert("Select at least one condition");
       const k = prompt("Step Name (e.g., 'signup_click', 'add_to_cart'):");
       if (k && k.trim()) saveRule('LOG_STEP', c, k.trim());
     };
-    shadow.getElementById('btn-start').onclick = () => {
+
+    btnStart.onclick = () => {
       const c = getConds();
       if (!c.length) return alert("Select at least one condition");
-      const timeoutInput = prompt("Recording timeout in minutes (leave blank for no timeout):");
+
+      // Read timeout from input
+      const timeoutInput = shadow.getElementById('input-timeout').value;
       let timeoutMs = null;
       if (timeoutInput && timeoutInput.trim()) {
         const minutes = parseFloat(timeoutInput.trim());
@@ -464,22 +547,18 @@
           timeoutMs = Math.floor(minutes * 60 * 1000);
         }
       }
+
       saveRule('START_RECORDING', c, null, timeoutMs);
     };
-    shadow.getElementById('btn-stop').onclick = () => {
+
+    btnStop.onclick = () => {
       const c = getConds();
       if (!c.length) return alert("Select at least one condition");
-      const status = prompt("Mark session as (type 'completed' or 'dropped_off', or leave blank for no status):");
-      let completionStatus = null;
-      if (status && status.trim()) {
-        const normalized = status.trim().toLowerCase();
-        if (normalized === 'completed' || normalized === 'dropped_off') {
-          completionStatus = normalized;
-        } else {
-          alert("Invalid status. Use 'completed' or 'dropped_off'");
-          return;
-        }
-      }
+
+      // Read status from radio buttons
+      const selectedRadio = shadow.querySelector('input[name="status"]:checked');
+      const completionStatus = selectedRadio && selectedRadio.value ? selectedRadio.value : null;
+
       saveRule('STOP_RECORDING', c, null, null, completionStatus);
     };
   }
