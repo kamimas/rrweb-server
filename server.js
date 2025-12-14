@@ -155,6 +155,8 @@ app.get("/api/projects/:token/config", async (req, res) => {
     // Get all rules joined with campaign names
     const { rows: rules } = await db.query(`
       SELECT
+        cr.id,
+        cr.campaign_id,
         cr.trigger_type,
         cr.selector,
         cr.action_type,
