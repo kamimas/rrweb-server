@@ -359,6 +359,41 @@ app.get("/api/projects/:token/campaigns/:campaign_id/rules", async (req, res) =>
   }
 });
 
+// ----- Delete Rule Endpoint (for Visual Editor) -----
+app.delete("/api/projects/:token/rules/:rule_id", async (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const { token, rule_id } = req.params;
+
+  // Validate token
+  const isValidToken = Object.values(allowedDomains).some(d => d.token === token);
+  if (!isValidToken) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
+  try {
+    const result = await db.query('DELETE FROM campaign_rules WHERE id = $1', [rule_id]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Rule not found" });
+    }
+
+    console.log(`🗑️  Rule deleted: ${rule_id}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error in DELETE /api/projects/:token/rules/:rule_id:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// CORS preflight for delete rule
+app.options("/api/projects/:token/rules/:rule_id", (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "DELETE");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
 // ----- JWT Middleware -----
 const authenticateJWT = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -573,13 +608,22 @@ app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
       });
     }
 
+    // Get all rules for this campaign (for admin UI)
+    const { rows: rules } = await db.query(`
+      SELECT id, trigger_type, selector, action_type, step_key, timeout_ms, completion_status, is_active, created_at
+      FROM campaign_rules
+      WHERE campaign_id = $1
+      ORDER BY created_at ASC
+    `, [id]);
+
     res.json({
       ...campaign,
       funnel_config: funnelConfig.length > 0 ? funnelConfig : null,
       generated_rubric: campaign.generated_rubric ? JSON.parse(campaign.generated_rubric) : null,
       session_count: sessionCount?.count || 0,
       completed_count: completedCount?.count || 0,
-      dropped_off_count: droppedOffCount?.count || 0
+      dropped_off_count: droppedOffCount?.count || 0,
+      rules: rules || []
     });
   } catch (err) {
     console.error("Error in GET /api/campaigns/:id:", err);

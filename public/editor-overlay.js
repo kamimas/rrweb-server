@@ -175,6 +175,23 @@
       white-space: nowrap;
       font-weight: 500;
     }
+    .hud-delete {
+      opacity: 0;
+      cursor: pointer;
+      color: hsl(0 72% 51%);
+      font-size: 16px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.2s;
+      margin-left: 8px;
+    }
+    .hud-item:hover .hud-delete {
+      opacity: 1;
+    }
+    .hud-delete:hover {
+      background: hsl(0 72% 51% / 0.2);
+      transform: scale(1.2);
+    }
     .hud-empty {
       padding: 8px 14px;
       font-style: italic;
@@ -566,6 +583,7 @@
             <div class="hud-item" title="${item.selector}">
               <span class="hud-icon">${itemIcon}</span>
               <span class="hud-desc">${desc}${draftBadge}</span>
+              <span class="hud-delete" data-rule-id="${item.id}" title="Delete rule">✕</span>
             </div>`;
         });
       }
@@ -577,6 +595,38 @@
     list.innerHTML += renderSection('Start Triggers', starts, '▶️', 'No start trigger');
     list.innerHTML += renderSection('Funnel Steps', steps, '📍', 'No steps defined');
     list.innerHTML += renderSection('Stop Triggers', stops, '⏹️', 'Manual stop only');
+
+    // Attach delete handlers (event delegation)
+    shadow.querySelectorAll('.hud-delete').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const ruleId = btn.getAttribute('data-rule-id');
+        deleteRule(ruleId);
+      };
+    });
+  }
+
+  // Delete Rule Handler
+  function deleteRule(ruleId) {
+    if (!confirm('Delete this rule? This cannot be undone.')) {
+      return;
+    }
+
+    fetch(`${SERVER_URL}/api/projects/${TOKEN}/rules/${ruleId}`, {
+      method: 'DELETE'
+    })
+      .then(res => {
+        if (!res.ok) throw new Error('Delete failed');
+        return res.json();
+      })
+      .then(() => {
+        console.log(`✅ Rule ${ruleId} deleted`);
+        fetchCampaignState(); // Refresh HUD
+      })
+      .catch(err => {
+        console.error('Delete error:', err);
+        alert('Failed to delete rule');
+      });
   }
 
   // Initial Load
