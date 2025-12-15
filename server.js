@@ -152,7 +152,7 @@ app.get("/api/projects/:token/config", async (req, res) => {
   }
 
   try {
-    // Get all rules joined with campaign names
+    // Get all ACTIVE rules joined with campaign names (SDK only uses published rules)
     const { rows: rules } = await db.query(`
       SELECT
         cr.id,
@@ -166,6 +166,7 @@ app.get("/api/projects/:token/config", async (req, res) => {
         cr.completion_status
       FROM campaign_rules cr
       JOIN campaigns c ON cr.campaign_id = c.id
+      WHERE cr.is_active = TRUE
       ORDER BY c.id, cr.id
     `);
 
@@ -277,6 +278,83 @@ app.post("/api/projects/:token/rules", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in POST /api/projects/:token/rules:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ----- Publish Rules Endpoint (Activate all draft rules for a campaign) -----
+app.post("/api/projects/:token/campaigns/:campaign_id/publish", async (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const { token, campaign_id } = req.params;
+
+  // Validate token
+  const isValidToken = Object.values(allowedDomains).some(d => d.token === token);
+  if (!isValidToken) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
+  try {
+    // Activate all draft rules for this campaign
+    const result = await db.query(`
+      UPDATE campaign_rules
+      SET is_active = TRUE
+      WHERE campaign_id = $1 AND is_active = FALSE
+    `, [campaign_id]);
+
+    console.log(`📢 Published ${result.rowCount} rules for campaign ${campaign_id}`);
+
+    res.json({
+      success: true,
+      published_count: result.rowCount
+    });
+  } catch (err) {
+    console.error("Error in POST /api/projects/:token/campaigns/:campaign_id/publish:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// CORS preflight for publish endpoint
+app.options("/api/projects/:token/campaigns/:campaign_id/publish", (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "POST");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// ----- Get ALL Rules for Visual Editor (including drafts) -----
+app.get("/api/projects/:token/campaigns/:campaign_id/rules", async (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const { token, campaign_id } = req.params;
+
+  // Validate token
+  const isValidToken = Object.values(allowedDomains).some(d => d.token === token);
+  if (!isValidToken) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
+  try {
+    // Get ALL rules (both active and drafts) for visual editor display
+    const { rows: rules } = await db.query(`
+      SELECT
+        cr.id,
+        cr.campaign_id,
+        cr.trigger_type,
+        cr.selector,
+        cr.action_type,
+        cr.step_key,
+        cr.timeout_ms,
+        cr.completion_status,
+        cr.is_active
+      FROM campaign_rules cr
+      WHERE cr.campaign_id = $1
+      ORDER BY cr.id
+    `, [campaign_id]);
+
+    res.json({ rules });
+  } catch (err) {
+    console.error("Error in GET /api/projects/:token/campaigns/:campaign_id/rules:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

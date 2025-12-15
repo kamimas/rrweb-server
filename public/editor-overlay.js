@@ -191,6 +191,54 @@
       color: hsl(0 72% 51%);
       background: hsl(0 72% 51% / 0.1);
     }
+    .hud-publish {
+      padding: 12px;
+      border-top: 1px solid hsl(220 14% 18%);
+      background: hsl(220 14% 10%);
+    }
+    .minimized .hud-publish { display: none; }
+    .publish-btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 1.5rem;
+      background: hsl(211 100% 60%);
+      color: white;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .publish-btn:hover {
+      background: hsl(211 100% 50%);
+      transform: translateY(-1px);
+    }
+    .publish-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .publish-status {
+      margin-top: 8px;
+      text-align: center;
+      font-size: 11px;
+      color: hsl(220 10% 60%);
+    }
+    .draft-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      background: hsl(45 100% 50%);
+      color: hsl(220 14% 12%);
+      font-size: 9px;
+      font-weight: 700;
+      border-radius: 4px;
+      margin-left: 6px;
+      text-transform: uppercase;
+    }
 
     /* MENU (The Popup) - Glass Morphism */
     .editor-menu {
@@ -399,6 +447,13 @@
     <div class="hud-content" id="hud-list">
       <div class="hud-loading">Loading rules...</div>
     </div>
+    <div class="hud-publish">
+      <button id="btn-publish" class="publish-btn">
+        <span>📢</span>
+        <span>Publish Rules</span>
+      </button>
+      <div id="publish-status" class="publish-status"></div>
+    </div>
   `;
   shadow.appendChild(hud);
 
@@ -430,15 +485,28 @@
 
     shadow.getElementById('hud-list').innerHTML = `<div class="hud-loading">Loading...</div>`;
 
-    fetch(`${SERVER_URL}/api/projects/${TOKEN}/config`)
+    // Fetch ALL rules (including drafts) for visual editor
+    fetch(`${SERVER_URL}/api/projects/${TOKEN}/campaigns/${CAMPAIGN_ID}/rules`)
       .then(res => {
         if (!res.ok) throw new Error('Failed to fetch');
         return res.json();
       })
       .then(data => {
-        const allRules = data.rules || [];
-        const myRules = allRules.filter(r => r.campaign_id === CAMPAIGN_ID);
-        renderHud(myRules);
+        const rules = data.rules || [];
+        renderHud(rules);
+
+        // Update publish button state
+        const draftCount = rules.filter(r => !r.is_active).length;
+        const publishBtn = shadow.getElementById('btn-publish');
+        const publishStatus = shadow.getElementById('publish-status');
+
+        if (draftCount > 0) {
+          publishBtn.disabled = false;
+          publishStatus.textContent = `${draftCount} draft rule${draftCount > 1 ? 's' : ''}`;
+        } else {
+          publishBtn.disabled = true;
+          publishStatus.textContent = 'All rules published';
+        }
       })
       .catch(err => {
         console.error('HUD fetch error:', err);
@@ -492,11 +560,12 @@
           }
 
           const itemIcon = item.action_type === 'LOG_STEP' ? `${idx + 1}.` : icon;
+          const draftBadge = !item.is_active ? '<span class="draft-badge">Draft</span>' : '';
 
           html += `
             <div class="hud-item" title="${item.selector}">
               <span class="hud-icon">${itemIcon}</span>
-              <span class="hud-desc">${desc}</span>
+              <span class="hud-desc">${desc}${draftBadge}</span>
             </div>`;
         });
       }
@@ -515,6 +584,41 @@
   shadow.getElementById('hud-refresh').onclick = (e) => {
     e.stopPropagation();
     fetchCampaignState();
+  };
+
+  // Publish Button Handler
+  shadow.getElementById('btn-publish').onclick = () => {
+    const publishBtn = shadow.getElementById('btn-publish');
+    const publishStatus = shadow.getElementById('publish-status');
+
+    if (publishBtn.disabled) return;
+
+    if (!confirm('Publish all draft rules? They will go live immediately on your website.')) {
+      return;
+    }
+
+    publishBtn.disabled = true;
+    publishStatus.textContent = 'Publishing...';
+
+    fetch(`${SERVER_URL}/api/projects/${TOKEN}/campaigns/${CAMPAIGN_ID}/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+      .then(res => {
+        if (!res.ok) throw new Error('Publish failed');
+        return res.json();
+      })
+      .then(data => {
+        publishStatus.textContent = `✅ Published ${data.published_count} rule${data.published_count > 1 ? 's' : ''}!`;
+        setTimeout(() => {
+          fetchCampaignState(); // Refresh to show updated status
+        }, 1500);
+      })
+      .catch(err => {
+        console.error('Publish error:', err);
+        publishStatus.textContent = '❌ Publish failed';
+        publishBtn.disabled = false;
+      });
   };
 
 

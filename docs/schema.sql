@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS campaign_rules (
     step_key VARCHAR(255),                        -- Step identifier for LOG_STEP
     timeout_ms INTEGER,                           -- Recording timeout in milliseconds (for START_RECORDING)
     completion_status VARCHAR(50),                -- 'completed' or 'dropped_off' (for STOP_RECORDING)
+    is_active BOOLEAN DEFAULT FALSE,              -- Rules are drafts until published
     created_at BIGINT NOT NULL
 );
 
