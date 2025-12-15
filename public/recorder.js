@@ -2,81 +2,37 @@
 (function() {
   "use strict";
 
-  // Version - check this in console: window.RRWEB_RECORDER_VERSION
   var VERSION = "2.0.0-direct-upload";
   window.RRWEB_RECORDER_VERSION = VERSION;
 
-  // Logging utility
-  var LOG_PREFIX = "🎥 [rrweb]";
-  function log(message, data) {
-    if (data !== undefined) {
-      console.log(LOG_PREFIX + " " + message, data);
-    } else {
-      console.log(LOG_PREFIX + " " + message);
-    }
-  }
-  function logWarn(message, data) {
-    if (data !== undefined) {
-      console.warn(LOG_PREFIX + " ⚠️ " + message, data);
-    } else {
-      console.warn(LOG_PREFIX + " ⚠️ " + message);
-    }
-  }
-  function logError(message, data) {
-    if (data !== undefined) {
-      console.error(LOG_PREFIX + " ❌ " + message, data);
-    } else {
-      console.error(LOG_PREFIX + " ❌ " + message);
-    }
-  }
-
-  log("Initializing recorder v" + VERSION + "...");
-
-  // Read the domain key from the script tag's data attribute
   var DOMAIN_TOKEN = document.currentScript.getAttribute("data-domain-key");
   if (!DOMAIN_TOKEN) {
-    logError("No domain key provided. Please include data-domain-key attribute.");
     return;
   }
-  log("Domain token found: " + DOMAIN_TOKEN.substring(0, 10) + "...");
 
   // Check for Editor Mode (with persistence across page navigation)
   var urlParams = new URLSearchParams(window.location.search);
-
-  // 1. Check URL params first (highest priority)
   var isEditorUrl = urlParams.get("__editor_mode") === "true";
-
-  // 2. Check sessionStorage for persistence (survives page navigation)
   var storedEditorMode = sessionStorage.getItem("__rrweb_editor_mode");
 
-  // Determine editor state
   var isEditorMode = false;
   var editorToken = null;
   var campaignId = null;
 
   if (isEditorUrl) {
-    // Fresh editor launch from URL
     isEditorMode = true;
     editorToken = urlParams.get("token");
     campaignId = urlParams.get("campaign_id");
-
-    // Save to sessionStorage for persistence across navigation
     sessionStorage.setItem("__rrweb_editor_mode", "true");
     sessionStorage.setItem("__rrweb_token", editorToken);
     sessionStorage.setItem("__rrweb_campaign_id", campaignId);
-    log("🎨 Editor Mode: Launched from URL, saved to storage");
   } else if (storedEditorMode === "true") {
-    // Restored from storage after page navigation
     isEditorMode = true;
     editorToken = sessionStorage.getItem("__rrweb_token");
     campaignId = sessionStorage.getItem("__rrweb_campaign_id");
-    log("🎨 Editor Mode: Restored from sessionStorage");
   }
 
   if (isEditorMode && editorToken) {
-    log("🎨 Editor Mode Active (token: " + editorToken.substring(0, 10) + "...)");
-
-    // Pass data to overlay via globals
     window.__RRWEB_EDITOR_TOKEN = editorToken;
     window.__RRWEB_CAMPAIGN_ID = campaignId;
     window.__RRWEB_DOMAIN_TOKEN = DOMAIN_TOKEN;
@@ -85,19 +41,11 @@
       ? window.RRWEB_SERVER_URL.replace("/upload-session", "/editor-overlay.js")
       : "http://localhost:3000/editor-overlay.js";
 
-    log("🎨 Loading overlay from: " + editorUrl);
-
     var editorScript = document.createElement("script");
     editorScript.src = editorUrl;
-    editorScript.onload = function() {
-      log("🎨 Visual editor loaded successfully");
-    };
-    editorScript.onerror = function() {
-      logError("Failed to load visual editor");
-    };
     document.head.appendChild(editorScript);
 
-    return; // Don't initialize recorder in editor mode
+    return;
   }
 
   // Storage keys
@@ -110,7 +58,7 @@
   var TIMEOUT_DURATION_KEY = "rrweb_timeout_duration";
 
   // Constants
-  var IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes = new session
+  var IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
   // State
   var events = [];
@@ -124,24 +72,19 @@
   var timeoutTimer = null;
   var librariesLoaded = false;
   var librariesLoading = false;
-  var chunkSequence = 0; // Sequence ID for chunk ordering (increments on every send)
+  var chunkSequence = 0;
 
-  // Utility: dynamically load external scripts
   function loadScript(src) {
     return new Promise(function(resolve, reject) {
       var script = document.createElement("script");
       script.src = src;
       script.async = true;
       script.onload = resolve;
-      script.onerror = function(err) {
-        console.error("Recorder: Failed to load script:", src);
-        reject(err);
-      };
+      script.onerror = reject;
       document.head.appendChild(script);
     });
   }
 
-  // Lazy load rrweb libraries
   function loadLibraries() {
     if (librariesLoaded) {
       return Promise.resolve();
@@ -172,37 +115,29 @@
       })
       .catch(function(err) {
         librariesLoading = false;
-        console.error("Recorder: Failed to load libraries:", err);
         throw err;
       });
   }
 
-  // Generate or retrieve distinct_id
   function getOrCreateDistinctId() {
     var id = localStorage.getItem(DISTINCT_ID_KEY);
     if (!id) {
       id = "uid_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
       localStorage.setItem(DISTINCT_ID_KEY, id);
-      log("Created new distinct ID: " + id);
-    } else {
-      log("Using existing distinct ID: " + id);
     }
     return id;
   }
 
-  // Check if idle timeout exceeded (30 min)
   function isIdleTimeoutExceeded() {
     var lastActivity = localStorage.getItem(LAST_ACTIVITY_KEY);
     if (!lastActivity) return true;
     return (Date.now() - parseInt(lastActivity, 10)) > IDLE_TIMEOUT_MS;
   }
 
-  // Update last activity timestamp
   function updateLastActivity() {
     localStorage.setItem(LAST_ACTIVITY_KEY, Date.now().toString());
   }
 
-  // Get or create session ID (new session if idle > 30min)
   function getOrCreateSessionId() {
     var existingSessionId = localStorage.getItem(SESSION_ID_KEY);
 
@@ -211,20 +146,13 @@
       localStorage.setItem(SESSION_ID_KEY, newSessionId);
       localStorage.removeItem(EVENTS_KEY);
       events = [];
-      chunkSequence = 0; // Reset sequence for new session
-      if (existingSessionId) {
-        log("🔄 Session expired (idle > 30min). Created new session: " + newSessionId);
-      } else {
-        log("🆕 Created new session: " + newSessionId);
-      }
+      chunkSequence = 0;
       return newSessionId;
     }
 
-    log("📌 Resuming existing session: " + existingSessionId);
     return existingSessionId;
   }
 
-  // Load stored events from localStorage
   function loadStoredEvents() {
     try {
       var stored = localStorage.getItem(EVENTS_KEY);
@@ -236,17 +164,16 @@
         }
       }
     } catch (err) {
-      console.error("Recorder: Error parsing stored events:", err);
+      // Ignore parse errors
     }
     events = [];
   }
 
-  // Save events to localStorage
   function saveEvents() {
     try {
       localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
     } catch (err) {
-      console.error("Recorder: Error saving events:", err);
+      // Ignore save errors
     }
   }
 
@@ -258,7 +185,6 @@
     };
   }
 
-  // Check if recording timeout has expired
   function isTimeoutExpired() {
     var timeoutStart = localStorage.getItem(TIMEOUT_START_KEY);
     var timeoutDuration = localStorage.getItem(TIMEOUT_DURATION_KEY);
@@ -269,7 +195,6 @@
     return elapsed >= parseInt(timeoutDuration, 10);
   }
 
-  // Get remaining timeout duration
   function getRemainingTimeout() {
     var timeoutStart = localStorage.getItem(TIMEOUT_START_KEY);
     var timeoutDuration = localStorage.getItem(TIMEOUT_DURATION_KEY);
@@ -281,7 +206,6 @@
     return remaining > 0 ? remaining : 0;
   }
 
-  // Clear timeout state
   function clearTimeoutState() {
     localStorage.removeItem(TIMEOUT_START_KEY);
     localStorage.removeItem(TIMEOUT_DURATION_KEY);
@@ -291,7 +215,6 @@
     }
   }
 
-  // Set up timeout timer
   function setupTimeoutTimer(durationMs) {
     if (timeoutTimer) {
       clearTimeout(timeoutTimer);
@@ -301,35 +224,23 @@
     }, durationMs);
   }
 
-  // Get base server URL (without /upload-session path)
   function getServerBaseUrl() {
     var url = window.RRWEB_SERVER_URL || "http://localhost:3000/upload-session";
     return url.replace("/upload-session", "");
   }
 
-  // Send events to S3 via presigned URL (Direct Upload)
-  // Flow: 1) Request presigned URL from server  2) Upload directly to S3
   function sendEvents() {
     if (events.length === 0) {
-      log("📤 No events to send (buffer empty)");
       return;
     }
     if (!currentCampaign) {
-      logError("No campaign set, cannot send events");
       return;
     }
 
-    var eventCount = events.length;
     var chunkTimestamp = Date.now();
-    var eventsToSend = events.slice(); // Copy events before clearing
-    var currentSeq = chunkSequence++; // Capture and increment sequence ID
+    var eventsToSend = events.slice();
+    var currentSeq = chunkSequence++;
 
-    log("📤 Direct upload: " + eventCount + " events (seq: " + currentSeq + ")", {
-      sessionId: sessionId,
-      campaign: currentCampaign
-    });
-
-    // Step 1: Request presigned URL from server (lightweight request)
     var baseUrl = getServerBaseUrl();
     var uploadUrlEndpoint = baseUrl + "/api/sessions/" + sessionId + "/upload-url";
 
@@ -340,10 +251,9 @@
       pageUrl: window.location.href,
       host: window.location.host,
       domainToken: DOMAIN_TOKEN,
-      sequenceId: currentSeq // Include sequence ID for ordering
+      sequenceId: currentSeq
     };
 
-    // Prepare the actual recording data (events only)
     var recordingData = {
       sessionId: sessionId,
       events: eventsToSend,
@@ -352,29 +262,22 @@
     };
     var recordingJson = JSON.stringify(recordingData);
 
-    // Compress with gzip using fflate
     var compressed = null;
     try {
       if (window.fflate) {
         compressed = fflate.gzipSync(fflate.strToU8(recordingJson));
-        log("📦 Compressed: " + recordingJson.length + " -> " + compressed.length + " bytes (" +
-            Math.round((1 - compressed.length / recordingJson.length) * 100) + "% saved)");
       }
     } catch (err) {
-      logWarn("Compression failed, direct upload requires gzip");
       return;
     }
 
     if (!compressed) {
-      logError("fflate not loaded, cannot compress payload");
       return;
     }
 
-    // Clear events buffer immediately (optimistic)
     events = [];
     saveEvents();
 
-    // Step 1: Get presigned URL
     fetch(uploadUrlEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -389,46 +292,28 @@
     })
     .then(function(data) {
       var uploadUrl = data.uploadUrl;
-      var s3Key = data.s3Key;
 
-      log("🎫 Got presigned URL for: " + s3Key.split("/").pop());
-
-      // Step 2: Upload directly to S3
       return fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Type": "application/gzip" },
         body: compressed,
         keepalive: true
-      }).then(function(s3Res) {
-        if (s3Res.ok) {
-          log("✅ Direct upload complete (" + eventCount + " events -> S3)");
-        } else {
-          throw new Error("S3 upload failed: " + s3Res.status);
-        }
       });
     })
-    .catch(function(err) {
-      logError("Direct upload failed: " + err.message);
-      // Events already cleared - they're lost on failure
-      // This is acceptable: better than blocking the main thread
+    .catch(function() {
+      // Silent failure
     });
   }
 
-  // Final flush for tab close - uses lightweight /flush endpoint
-  // sendBeacon can't do two-step presigned URLs, so we use a dedicated flush endpoint
-  // Plain JSON (no gzip) - final chunks are small anyway
   function flushEvents() {
     if (events.length === 0) return;
     if (!currentCampaign) return;
     if (!sessionId) return;
 
-    var eventCount = events.length;
-    var currentSeq = chunkSequence++; // Capture and increment sequence ID
+    var currentSeq = chunkSequence++;
     var baseUrl = getServerBaseUrl();
-    // Append sequence ID to URL (sendBeacon can't send custom JSON with Blob body)
     var flushUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + currentSeq;
 
-    // Plain JSON payload (no gzip - keep it simple and reliable for tab close)
     var payload = {
       events: events,
       campaign: currentCampaign,
@@ -442,119 +327,74 @@
     try {
       if (navigator.sendBeacon) {
         var blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-        var sent = navigator.sendBeacon(flushUrl, blob);
-        if (sent) {
-          log("🚪 Final flush sent via sendBeacon (" + eventCount + " events, seq: " + currentSeq + ")");
-        } else {
-          logWarn("sendBeacon returned false");
-        }
+        navigator.sendBeacon(flushUrl, blob);
       }
     } catch (err) {
-      // Ignore errors on unload - nothing we can do
+      // Ignore errors on unload
     }
 
     events = [];
     saveEvents();
   }
 
-  // Start rrweb recording - LAZY LOADS LIBRARIES FIRST
   function startRecordingInternal(options) {
     options = options || {};
 
-    log("▶️ startRecording() called", options);
-
-    // Campaign is required
     if (!options.campaign || typeof options.campaign !== "string") {
-      logError("Campaign is required. Usage: recorder.startRecording({ campaign: 'my-campaign' })");
       return;
     }
 
     if (isRecordingActive) {
-      logWarn("Already recording for campaign: " + currentCampaign);
       return;
     }
 
-    // Check if previous timeout expired - if so, clear state
     if (isTimeoutExpired()) {
-      log("⏰ Previous recording timeout expired, clearing state");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
     }
 
-    // Set campaign
     currentCampaign = options.campaign;
     localStorage.setItem(CAMPAIGN_KEY, currentCampaign);
-    log("📋 Campaign set: " + currentCampaign);
 
-    // Handle timeout
     if (options.timeout && typeof options.timeout === "number" && options.timeout > 0) {
       localStorage.setItem(TIMEOUT_START_KEY, Date.now().toString());
       localStorage.setItem(TIMEOUT_DURATION_KEY, options.timeout.toString());
       setupTimeoutTimer(options.timeout);
-      log("⏱️ Recording timeout set: " + (options.timeout / 1000) + " seconds");
     }
 
-    // Get or create session (new if idle > 30min)
     sessionId = getOrCreateSessionId();
     updateLastActivity();
     loadStoredEvents();
 
-    log("📚 Loading rrweb libraries...");
-
-    // LAZY LOAD: Load libraries first, then start recording
     loadLibraries()
       .then(function() {
         try {
-          var eventCounter = 0;
           stopFn = rrweb.record({
             emit: function(event) {
               events.push(event);
-              eventCounter++;
               updateLastActivity();
               saveEventsDebounced();
-              // Log every 10th event to avoid spam, or first 3 events
-              if (eventCounter <= 3 || eventCounter % 10 === 0) {
-                log("🔴 Recording event #" + eventCounter + " (type: " + event.type + ", total buffered: " + events.length + ")");
-              }
             }
           });
           isRecordingActive = true;
-          log("🎬 ========================================");
-          log("🎬 RECORDING STARTED");
-          log("🎬 Session ID: " + sessionId);
-          log("🎬 Campaign: " + currentCampaign);
-          log("🎬 Distinct ID: " + distinctId);
-          log("🎬 Page: " + window.location.href);
-          log("🎬 ========================================");
 
-          // Immediate flush to register session on server (fixes checkpoint 404 race condition)
           setTimeout(function() {
-            log("📤 Initial flush to register session on server...");
             sendEvents();
           }, 500);
         } catch (err) {
-          logError("Error starting rrweb recording: " + err.message);
+          // Silent failure
         }
       })
-      .catch(function(err) {
-        logError("Failed to load libraries: " + err.message);
+      .catch(function() {
+        // Silent failure
       });
   }
 
-  // Stop rrweb recording
   function stopRecordingInternal() {
     if (!isRecordingActive) {
-      log("⏹️ stopRecording() called but not currently recording");
       return;
     }
 
-    log("⏹️ ========================================");
-    log("⏹️ STOPPING RECORDING");
-    log("⏹️ Session ID: " + sessionId);
-    log("⏹️ Campaign: " + currentCampaign);
-    log("⏹️ ========================================");
-
-    // Flush pending events before stopping
     sendEvents();
 
     if (typeof stopFn === "function") {
@@ -563,86 +403,55 @@
     }
 
     isRecordingActive = false;
-
-    // Clear timeout state
     clearTimeoutState();
-
-    // Clear campaign
     currentCampaign = null;
     localStorage.removeItem(CAMPAIGN_KEY);
-
-    // Clear session ID - session is now closed
     localStorage.removeItem(SESSION_ID_KEY);
     sessionId = null;
-
-    log("✅ Recording stopped successfully");
   }
 
-  // Check if recording is active
   function isRecordingInternal() {
     return isRecordingActive;
   }
 
-  // Get current campaign
   function getCampaignInternal() {
     return currentCampaign;
   }
 
-  // Resume recording if it was active before page navigation
   function tryResumeRecording() {
     var savedCampaign = localStorage.getItem(CAMPAIGN_KEY);
     if (!savedCampaign) {
-      log("🔍 No saved campaign found, not auto-resuming");
       return;
     }
 
-    // Check if timeout expired
     if (isTimeoutExpired()) {
-      log("⏰ Saved campaign timeout expired, clearing state");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
       return;
     }
 
-    log("🔄 Auto-resuming recording for campaign: " + savedCampaign);
-    // Resume recording with saved campaign
     startRecordingInternal({
       campaign: savedCampaign,
       timeout: getRemainingTimeout() || undefined
     });
   }
 
-  // ------------------------------------------------------
-  // Autopilot Logic (The Brain)
-  // ------------------------------------------------------
-
   function runAutopilot(rules) {
     if (!rules || rules.length === 0) return;
-    log("🤖 Autopilot engaged with " + rules.length + " rules");
 
-    // Helper: Execute the action defined in the DB
     function executeRule(rule) {
-      log("🤖 Rule Triggered: " + rule.action_type + " on " + rule.selector);
-
       if (rule.action_type === "START_RECORDING") {
-        // Only start if we have a campaign name
         if (rule.campaign_name) {
           var options = { campaign: rule.campaign_name };
-          // Add timeout if specified in rule
           if (rule.timeout_ms) {
             options.timeout = rule.timeout_ms;
-            log("🤖 Starting recording with timeout: " + (rule.timeout_ms / 60000) + " minutes");
           }
           window.recorder.startRecording(options);
-        } else {
-          logWarn("🤖 Cannot start recording: Rule missing campaign_name");
         }
       }
       else if (rule.action_type === "STOP_RECORDING") {
         window.recorder.stopRecording();
-        // Set status if specified in rule
         if (rule.completion_status) {
-          log("🤖 Setting session status to: " + rule.completion_status);
           window.recorder.setStatus(rule.completion_status);
         }
       }
@@ -653,14 +462,11 @@
       }
     }
 
-    // 1. URL Monitor (Checks on Load + History Changes)
     function checkUrlRules() {
       var currentPath = window.location.pathname;
       rules.forEach(function(rule) {
         if (rule.trigger_type === "URL_CONTAINS") {
-          // specific check: /pricing matches /pricing/details?id=1
           if (currentPath.indexOf(rule.selector) !== -1) {
-             // Avoid re-triggering 'START' if already recording same campaign
              if (rule.action_type === "START_RECORDING" &&
                  window.recorder.isRecording() &&
                  window.recorder.getCampaign() === rule.campaign_name) {
@@ -672,46 +478,38 @@
       });
     }
 
-    // Monkey-patch History API to detect SPA navigation
     var originalPushState = history.pushState;
     history.pushState = function() {
       originalPushState.apply(this, arguments);
-      setTimeout(checkUrlRules, 50); // Small delay to let URL update
+      setTimeout(checkUrlRules, 50);
     };
     window.addEventListener("popstate", checkUrlRules);
-    checkUrlRules(); // Run immediately on load
+    checkUrlRules();
 
-    // 2. Click Monitor (Global Listener)
     document.addEventListener("click", function(e) {
-      // Normalization helper: "Climb up" to find the interactive element
       function normalizeTarget(el) {
         var interactive = el.closest('a, button, [role="button"], input, select, textarea, [onclick]');
         return interactive || el;
       }
 
-      // We loop through 'CLICK_ELEMENT' rules
       rules.forEach(function(rule) {
         if (rule.trigger_type === "CLICK_ELEMENT") {
           var isMatch = false;
           var conditions = null;
 
-          // 1. Try to parse JSON (New GTM-style composite rules)
           try {
             var parsed = JSON.parse(rule.selector);
             if (parsed.operator === "AND" && Array.isArray(parsed.conditions)) {
               conditions = parsed.conditions;
             }
           } catch (err) {
-            // Not JSON, fall back to legacy string logic below
+            // Not JSON, fall back to legacy string logic
           }
 
           if (conditions) {
-            // --- GTM STYLE LOGIC ---
-            // "AND" Logic: All conditions must pass
             var target = normalizeTarget(e.target);
 
             var allPassed = conditions.every(function(cond) {
-              // A. Check Page Path
               if (cond.type === 'PAGE_PATH') {
                 if (cond.op === 'contains') {
                   return window.location.pathname.indexOf(cond.val) !== -1;
@@ -719,7 +517,6 @@
                 return window.location.pathname === cond.val;
               }
 
-              // B. Check Click Text
               if (cond.type === 'CLICK_TEXT') {
                 var txt = (target.innerText || target.textContent || "").trim();
                 if (cond.op === 'equals') {
@@ -728,13 +525,11 @@
                 return txt.indexOf(cond.val) !== -1;
               }
 
-              // C. Check Click ID
               if (cond.type === 'CLICK_ID') {
                 var expectedId = cond.val.startsWith('#') ? cond.val : '#' + cond.val;
                 return ('#' + target.id) === expectedId;
               }
 
-              // D. Check Click Href
               if (cond.type === 'CLICK_HREF') {
                 var anchor = target.closest('a');
                 if (!anchor) return false;
@@ -745,9 +540,7 @@
                 return actualHref === cond.val;
               }
 
-              // E. Check Click Attribute (data-testid, etc.)
               if (cond.type === 'CLICK_ATTR') {
-                // val format: [data-testid="value"]
                 var attrMatch = cond.val.match(/\[([^\]=]+)="([^"]+)"\]/);
                 if (attrMatch) {
                   var attrName = attrMatch[1];
@@ -757,7 +550,6 @@
                 return false;
               }
 
-              // F. Check CSS Selector
               if (cond.type === 'CLICK_SELECTOR') {
                 try {
                   return target.matches(cond.val) || e.target.matches(cond.val);
@@ -771,25 +563,18 @@
 
             if (allPassed) {
               isMatch = true;
-              log("🤖 GTM Rule matched: " + conditions.length + " conditions passed");
             }
 
           } else {
-            // --- LEGACY LOGIC (String selectors for backwards compatibility) ---
-
-            // STRATEGY A: Text Match (Custom Logic)
-            // Handles selectors like: text="Sign Up"
             if (rule.selector.startsWith('text="') || rule.selector.startsWith("text='")) {
               var expectedText = rule.selector
                 .replace(/^text=["']/, '')
                 .replace(/["']$/, '')
                 .trim();
               var clickedText = (e.target.innerText || "").trim();
-              // Check if clicked element contains the expected text
               if (clickedText === expectedText || clickedText.indexOf(expectedText) !== -1) {
                 isMatch = true;
               }
-              // Also check parent elements (for spans inside buttons, etc.)
               if (!isMatch && e.target.parentElement) {
                 var parentText = (e.target.parentElement.innerText || "").trim();
                 if (parentText === expectedText) {
@@ -797,23 +582,18 @@
                 }
               }
             }
-            // STRATEGY B: Href Match (Custom Logic)
-            // Handles selectors like: href="/pricing"
             else if (rule.selector.startsWith('href="') || rule.selector.startsWith("href='")) {
               var expectedHref = rule.selector
                 .replace(/^href=["']/, '')
                 .replace(/["']$/, '');
-              // Find closest anchor tag
               var anchor = e.target.closest('a');
               if (anchor) {
                 var actualHref = anchor.getAttribute('href') || '';
-                // Match if href equals or contains the expected value
                 if (actualHref === expectedHref || actualHref.indexOf(expectedHref) !== -1) {
                   isMatch = true;
                 }
               }
             }
-            // STRATEGY C: Standard CSS Selector
             else {
               try {
                 if (e.target.matches(rule.selector) || e.target.closest(rule.selector)) {
@@ -821,42 +601,35 @@
                 }
               } catch (err) {
                 // Ignore invalid selector errors
-                log("🤖 Invalid selector: " + rule.selector);
               }
             }
           }
 
-          // Execute the rule if matched
           if (isMatch) {
             executeRule(rule);
           }
         }
       });
-    }, true); // Capture phase (run before other scripts)
+    }, true);
   }
 
-  // Initialize the recorder
   function init() {
     distinctId = getOrCreateDistinctId();
     saveEventsDebounced = debounce(saveEvents, 500);
 
-    // Expose public API immediately (NO library loading yet)
     window.recorder = window.recorder || {};
     window.recorder.startRecording = startRecordingInternal;
     window.recorder.stopRecording = stopRecordingInternal;
     window.recorder.isRecording = isRecordingInternal;
     window.recorder.getCampaign = getCampaignInternal;
-    window.recorder.ready = Promise.resolve(); // Always ready - libraries load on-demand
+    window.recorder.ready = Promise.resolve();
     window.recorder.identify = function(email) {
-      log("👤 identify() called with email: " + email);
       if (!email || typeof email !== "string") {
-        logError("Invalid email provided to identify()");
         return Promise.reject(new Error("Invalid email"));
       }
       var identifyUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/identify")
         : "http://localhost:3000/identify";
-      log("👤 Sending identify request to: " + identifyUrl);
       return fetch(identifyUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -871,35 +644,19 @@
         .then(function(res) {
           if (!res.ok) throw new Error("Failed to identify user");
           return res.json();
-        })
-        .then(function(data) {
-          log("👤 ========================================");
-          log("👤 USER IDENTIFIED");
-          log("👤 Email: " + email);
-          log("👤 Distinct ID: " + distinctId);
-          log("👤 ========================================");
-          return data;
-        })
-        .catch(function(err) {
-          logError("Failed to identify user: " + err.message);
-          throw err;
         });
     };
 
     window.recorder.setStatus = function(status) {
-      log("🏷️ setStatus() called with: " + status);
       if (!status || !["completed", "dropped_off"].includes(status)) {
-        logError("Invalid status. Must be 'completed' or 'dropped_off'");
         return Promise.reject(new Error("Invalid status"));
       }
       if (!sessionId) {
-        logError("No active session. Make sure startRecording was called first.");
         return Promise.reject(new Error("No active session"));
       }
       var statusUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/sessions/" + sessionId + "/status")
         : "http://localhost:3000/api/sessions/" + sessionId + "/status";
-      log("🏷️ Sending status update to: " + statusUrl);
       return fetch(statusUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -913,35 +670,19 @@
         .then(function(res) {
           if (!res.ok) throw new Error("Failed to set session status");
           return res.json();
-        })
-        .then(function(data) {
-          log("🏷️ ========================================");
-          log("🏷️ SESSION STATUS UPDATED");
-          log("🏷️ Session ID: " + sessionId);
-          log("🏷️ Status: " + status);
-          log("🏷️ ========================================");
-          return data;
-        })
-        .catch(function(err) {
-          logError("Failed to set session status: " + err.message);
-          throw err;
         });
     };
 
     window.recorder.checkpoint = function(key) {
-      log("📍 checkpoint() called with: " + key);
       if (!key || typeof key !== "string") {
-        logError("Invalid key. Must be a non-empty string.");
         return;
       }
       if (!sessionId) {
-        logWarn("No active session for checkpoint. Ignoring.");
         return;
       }
       var checkpointUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/sessions/" + sessionId + "/checkpoint")
         : "http://localhost:3000/api/sessions/" + sessionId + "/checkpoint";
-      // Fire-and-forget - don't block on response
       fetch(checkpointUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -951,27 +692,18 @@
           domainToken: DOMAIN_TOKEN
         }),
         credentials: "include"
-      })
-        .then(function(res) {
-          if (res.ok) {
-            log("📍 Checkpoint sent: " + key);
-          }
-        })
-        .catch(function(err) {
-          logWarn("Failed to send checkpoint: " + err.message);
-        });
+      }).catch(function() {
+        // Silent failure
+      });
     };
 
     window.recorder.getSessionId = function() {
       return sessionId;
     };
 
-    // Fetch Autopilot Config
     var configUrl = window.RRWEB_SERVER_URL
         ? window.RRWEB_SERVER_URL.replace("/upload-session", "/api/projects/" + DOMAIN_TOKEN + "/config")
         : "http://localhost:3000/api/projects/" + DOMAIN_TOKEN + "/config";
-
-    log("🤖 Fetching Autopilot config...");
 
     fetch(configUrl)
       .then(function(res) {
@@ -979,57 +711,41 @@
         throw new Error("Config fetch failed");
       })
       .then(function(data) {
-        // 1. Run Autopilot if rules exist
         if (data.rules && Array.isArray(data.rules)) {
           runAutopilot(data.rules);
         }
 
-        // 2. Resume Manual Session (if needed)
-        // Only resume if Autopilot didn't just start a new one
         if (!window.recorder.isRecording()) {
           tryResumeRecording();
         }
       })
       .catch(function(err) {
-        logWarn("🤖 Autopilot disabled (Config fetch failed or offline). Falling back to manual mode.");
         tryResumeRecording();
       });
 
-    // Periodic send (60s interval) - uses direct S3 upload
     setInterval(function() {
       if (isRecordingActive) {
-        log("⏰ Periodic flush triggered (60s interval)");
         sendEvents();
       }
     }, 60000);
 
-    // Tab close detection - uses lightweight /flush endpoint
-    // visibilitychange is MORE RELIABLE than beforeunload for modern browsers
     document.addEventListener("visibilitychange", function() {
       if (document.visibilityState === "hidden" && isRecordingActive) {
-        log("🚪 Tab hidden - flushing final events...");
         flushEvents();
       }
     });
 
-    // Fallback for older browsers that don't fire visibilitychange reliably
     window.addEventListener("beforeunload", function() {
       if (isRecordingActive) {
-        log("🚪 Page unload - flushing final events...");
         flushEvents();
       }
     });
 
-    // Also catch pagehide for mobile Safari and bfcache scenarios
     window.addEventListener("pagehide", function() {
       if (isRecordingActive) {
-        log("🚪 Page hide - flushing final events...");
         flushEvents();
       }
     });
-
-    log("✅ Recorder initialized successfully");
-    log("📖 Available methods: recorder.startRecording(), recorder.stopRecording(), recorder.identify(), recorder.setStatus(), recorder.checkpoint(), recorder.isRecording(), recorder.getSessionId()");
   }
 
   init();
