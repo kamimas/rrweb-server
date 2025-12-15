@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Deploy to OVH
 
 on:
   push:
@@ -9,7 +9,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to EC2
+      - name: Deploy to OVH VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -19,5 +19,5 @@ jobs:
             cd ~/rrweb-server
             git fetch origin main
             git reset --hard origin/main
-            docker-compose down
-            docker-compose up -d --build
+            docker compose down
+            docker compose up -d --build
