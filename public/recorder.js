@@ -450,9 +450,21 @@
         }
       }
       else if (rule.action_type === "STOP_RECORDING") {
-        window.recorder.stopRecording();
-        if (rule.completion_status) {
-          window.recorder.setStatus(rule.completion_status);
+        // CRITICAL: Save sessionId BEFORE stopRecording() clears it
+        var currentSessionId = window.recorder.getSessionId();
+
+        if (rule.completion_status && currentSessionId) {
+          // Set status BEFORE stopping (while session still exists)
+          window.recorder.setStatus(rule.completion_status)
+            .then(function() {
+              window.recorder.stopRecording();
+            })
+            .catch(function(err) {
+              console.error("Failed to set status:", err);
+              window.recorder.stopRecording();  // Stop anyway
+            });
+        } else {
+          window.recorder.stopRecording();
         }
       }
       else if (rule.action_type === "LOG_STEP") {
