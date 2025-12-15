@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS campaign_rules (
 CREATE INDEX IF NOT EXISTS idx_campaign_rules_campaign_id ON campaign_rules(campaign_id);
 
 -- =============================================================================
+-- SESSION STEPS TABLE
+-- Tracks step-by-step journey for each session (for funnel analytics)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS session_steps (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,             -- References sessions.session_id
+    step_key VARCHAR(255) NOT NULL,               -- Step identifier from funnel_config
+    step_index INTEGER NOT NULL,                  -- Index in funnel_config array
+    visited_at TIMESTAMPTZ DEFAULT NOW(),         -- When the step was reached
+    UNIQUE(session_id, step_key)                  -- One entry per step per session
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_steps_session_id ON session_steps(session_id);
+
+-- =============================================================================
 -- HELPER VIEWS (Optional, for convenience)
 -- =============================================================================
 

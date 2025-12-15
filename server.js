@@ -686,6 +686,73 @@ app.put("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   }
 });
 
+// Get funnel analytics for a campaign (auth required)
+app.get("/api/campaigns/:id/funnel-stats", authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get campaign with funnel config
+    const campaign = await db.queryOne(`
+      SELECT id, name, funnel_config FROM campaigns WHERE id = $1
+    `, [id]);
+
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    if (!campaign.funnel_config) {
+      return res.json({ steps: [], total_sessions: 0 });
+    }
+
+    const funnelConfig = JSON.parse(campaign.funnel_config);
+
+    // Get total sessions for this campaign
+    const totalResult = await db.queryOne(`
+      SELECT COUNT(DISTINCT session_id) as count
+      FROM session_chunks WHERE campaign_id = $1
+    `, [id]);
+    const totalSessions = parseInt(totalResult?.count || 0);
+
+    // Get step counts from session_steps
+    const { rows: stepCounts } = await db.query(`
+      SELECT ss.step_key, COUNT(DISTINCT ss.session_id) as reached
+      FROM session_steps ss
+      WHERE ss.session_id IN (
+        SELECT DISTINCT session_id FROM session_chunks WHERE campaign_id = $1
+      )
+      GROUP BY ss.step_key
+    `, [id]);
+
+    // Build step count map
+    const countMap = {};
+    stepCounts.forEach(row => {
+      countMap[row.step_key] = parseInt(row.reached);
+    });
+
+    // Build response with all steps from funnel_config
+    const steps = funnelConfig.map((step, index) => {
+      const reached = countMap[step.key] || 0;
+      return {
+        key: step.key,
+        name: step.name,
+        index,
+        reached,
+        percentage: totalSessions > 0 ? Math.round((reached / totalSessions) * 100) : 0
+      };
+    });
+
+    res.json({
+      campaign_id: parseInt(id),
+      campaign_name: campaign.name,
+      total_sessions: totalSessions,
+      steps
+    });
+  } catch (err) {
+    console.error("Error in GET /api/campaigns/:id/funnel-stats:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Delete campaign (auth required)
 app.delete("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
@@ -1223,6 +1290,15 @@ app.get("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
       WHERE a.distinct_id = $1
     `, [session.distinct_id]);
 
+    // Get journey (step visits) for this session
+    const { rows: stepVisits } = await db.query(`
+      SELECT step_key, step_index, visited_at
+      FROM session_steps
+      WHERE session_id = $1
+      ORDER BY step_index ASC
+    `, [session_id]);
+    const journey = stepVisits.map(s => s.step_key);
+
     // Resolve furthest_step_index to key string
     let furthest_step_key = null;
     if (session.funnel_config && session.furthest_step_index >= 0) {
@@ -1244,7 +1320,8 @@ app.get("/api/sessions/:session_id", authenticateJWT, async (req, res) => {
       assets_status: session.assets_status || "raw",
       watched: session.watched === true,
       playback_url: `/api/sessions/${session.session_id}/playback`,
-      furthest_step_key
+      furthest_step_key,
+      journey
     });
   } catch (err) {
     console.error("Error in GET /api/sessions/:session_id:", err);
@@ -1402,13 +1479,20 @@ app.post("/api/sessions/:session_id/checkpoint", validateDomainToken, async (req
       return res.sendStatus(200); // Unknown key, silently accept
     }
 
-    // 4. Get current progress (handle missing session row)
+    // 4. Record step visit for journey tracking (ignore if already visited)
+    await db.query(`
+      INSERT INTO session_steps (session_id, step_key, step_index)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (session_id, step_key) DO NOTHING
+    `, [session_id, key, stepIndex]);
+
+    // 5. Get current progress (handle missing session row)
     const session = await db.queryOne(`
       SELECT furthest_step_index FROM sessions WHERE session_id = $1
     `, [session_id]);
     const currentIndex = session?.furthest_step_index ?? -1;
 
-    // 5. Update only if advancing deeper into funnel ("high score" rule)
+    // 6. Update only if advancing deeper into funnel ("high score" rule)
     if (stepIndex > currentIndex) {
       await db.query(`
         INSERT INTO sessions (session_id, furthest_step_index)
