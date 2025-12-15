@@ -72,7 +72,7 @@ app.use((req, res, next) => {
   // Public API routes (autopilot) - allow any origin
   if (req.path.startsWith('/api/projects/')) {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
