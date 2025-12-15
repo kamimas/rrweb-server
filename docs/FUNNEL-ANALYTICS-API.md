@@ -10,9 +10,16 @@ Track user journeys through your funnel steps. See how many users reached each s
 
 ```
 GET /api/campaigns/:id/funnel-stats
+GET /api/campaigns/:id/funnel-stats?status=dropped_off
+GET /api/campaigns/:id/funnel-stats?status=completed
 ```
 
 **Auth:** JWT required
+
+**Query Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Optional. Filter by session status: `dropped_off` or `completed`. If omitted, includes all sessions. |
 
 **Response:**
 ```json
@@ -20,6 +27,7 @@ GET /api/campaigns/:id/funnel-stats
   "campaign_id": 1,
   "campaign_name": "Checkout Flow",
   "total_sessions": 1000,
+  "status": "dropped_off",
   "steps": [
     { "key": "view_home", "name": "Landing", "index": 0, "reached": 1000, "percentage": 100 },
     { "key": "view_pricing", "name": "Pricing", "index": 1, "reached": 750, "percentage": 75 },
@@ -34,7 +42,8 @@ GET /api/campaigns/:id/funnel-stats
 |-------|------|-------------|
 | `campaign_id` | number | Campaign ID |
 | `campaign_name` | string | Campaign name |
-| `total_sessions` | number | Total sessions in this campaign |
+| `total_sessions` | number | Total sessions matching the filter |
+| `status` | string\|null | The status filter applied, or `null` if no filter |
 | `steps` | array | Funnel steps with counts |
 | `steps[].key` | string | Step identifier |
 | `steps[].name` | string | Display name |
@@ -70,10 +79,10 @@ GET /api/sessions/:session_id
 
 ## Usage Examples
 
-### Render a Funnel Chart
+### Render a Funnel Chart (dropped_off sessions only)
 
 ```typescript
-const response = await fetch(`/api/campaigns/${campaignId}/funnel-stats`, {
+const response = await fetch(`/api/campaigns/${campaignId}/funnel-stats?status=dropped_off`, {
   headers: { Authorization: `Bearer ${token}` }
 });
 const { steps, total_sessions } = await response.json();

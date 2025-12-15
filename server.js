@@ -690,6 +690,12 @@ app.put("/api/campaigns/:id", authenticateJWT, async (req, res) => {
 app.get("/api/campaigns/:id/funnel-stats", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
+    const { status } = req.query;
+
+    // Validate status if provided
+    if (status && !["completed", "dropped_off"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
+    }
 
     // Get campaign with funnel config
     const campaign = await db.queryOne(`
@@ -701,25 +707,36 @@ app.get("/api/campaigns/:id/funnel-stats", authenticateJWT, async (req, res) => 
     }
 
     if (!campaign.funnel_config) {
-      return res.json({ steps: [], total_sessions: 0 });
+      return res.json({ steps: [], total_sessions: 0, status: status || null });
     }
 
     const funnelConfig = JSON.parse(campaign.funnel_config);
 
-    // Get total sessions for this campaign
+    // Build status filter clause
+    let statusFilter = "";
+    if (status === "dropped_off") {
+      statusFilter = "AND (s.status IS NULL OR s.status = 'dropped_off')";
+    } else if (status === "completed") {
+      statusFilter = "AND s.status = 'completed'";
+    }
+
+    // Get total sessions for this campaign (with optional status filter)
     const totalResult = await db.queryOne(`
-      SELECT COUNT(DISTINCT session_id) as count
-      FROM session_chunks WHERE campaign_id = $1
+      SELECT COUNT(DISTINCT sc.session_id) as count
+      FROM session_chunks sc
+      LEFT JOIN sessions s ON sc.session_id = s.session_id
+      WHERE sc.campaign_id = $1 ${statusFilter}
     `, [id]);
     const totalSessions = parseInt(totalResult?.count || 0);
 
-    // Get step counts from session_steps
+    // Get step counts from session_steps (with optional status filter)
     const { rows: stepCounts } = await db.query(`
       SELECT ss.step_key, COUNT(DISTINCT ss.session_id) as reached
       FROM session_steps ss
+      LEFT JOIN sessions s ON ss.session_id = s.session_id
       WHERE ss.session_id IN (
         SELECT DISTINCT session_id FROM session_chunks WHERE campaign_id = $1
-      )
+      ) ${statusFilter}
       GROUP BY ss.step_key
     `, [id]);
 
@@ -745,6 +762,7 @@ app.get("/api/campaigns/:id/funnel-stats", authenticateJWT, async (req, res) => 
       campaign_id: parseInt(id),
       campaign_name: campaign.name,
       total_sessions: totalSessions,
+      status: status || null,
       steps
     });
   } catch (err) {
