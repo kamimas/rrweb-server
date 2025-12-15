@@ -389,9 +389,10 @@ app.delete("/api/projects/:token/rules/:rule_id", async (req, res) => {
 // CORS preflight for delete rule
 app.options("/api/projects/:token/rules/:rule_id", (req, res) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "DELETE");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
-  res.sendStatus(200);
+  res.header("Access-Control-Allow-Methods", "DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Max-Age", "86400"); // Cache preflight for 24h
+  res.sendStatus(204);
 });
 
 // ----- JWT Middleware -----
