@@ -255,6 +255,8 @@
       border-radius: 4px;
       margin-left: 6px;
       text-transform: uppercase;
+      flex-shrink: 0;
+      white-space: nowrap;
     }
 
     /* MENU (The Popup) - Glass Morphism */
@@ -582,7 +584,8 @@
           html += `
             <div class="hud-item" title="${item.selector}">
               <span class="hud-icon">${itemIcon}</span>
-              <span class="hud-desc">${desc}${draftBadge}</span>
+              <span class="hud-desc">${desc}</span>
+              ${draftBadge}
               <span class="hud-delete" data-rule-id="${item.id}" title="Delete rule">✕</span>
             </div>`;
         });
