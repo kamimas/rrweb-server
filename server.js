@@ -1260,14 +1260,7 @@ app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) 
   try {
     const { session_id } = req.params;
 
-    // Check cache first
-    const cached = sessionCache.get(session_id);
-    if (cached) {
-      console.log(`⚡ Cache hit for session: ${session_id}`);
-      return res.json(cached);
-    }
-
-    // Get all chunks for this session, ordered by sequence_id (with timestamp fallback)
+    // 1. Always get "Source of Truth" from DB first (required anyway for S3 keys)
     const { rows: chunks } = await db.query(`
       SELECT sc.*, c.name as campaign_name
       FROM session_chunks sc
@@ -1289,7 +1282,18 @@ app.get("/api/sessions/:session_id/playback", authenticateJWT, async (req, res) 
       return res.status(404).json({ error: "No valid session data found" });
     }
 
-    // Fetch all chunks from S3 in PARALLEL
+    // 2. Check cache BUT validate against DB truth (version-based read repair)
+    const cached = sessionCache.get(session_id);
+    if (cached && cached.metadata?.chunk_count === chunks.length) {
+      console.log(`⚡ Cache hit for session: ${session_id} (${chunks.length} chunks)`);
+      return res.json(cached);
+    }
+
+    if (cached) {
+      console.log(`🔄 Cache stale for session: ${session_id} (DB: ${chunks.length} chunks, Cache: ${cached.metadata?.chunk_count || 0} chunks)`);
+    }
+
+    // 3. Fetch all chunks from S3 in PARALLEL (cache miss or stale)
     console.log(`📥 Fetching ${validChunks.length} chunks from S3 for session: ${session_id}`);
     const fetchStart = Date.now();
 
