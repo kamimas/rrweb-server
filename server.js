@@ -5,7 +5,7 @@ const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const AWS = require("aws-sdk");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
@@ -554,6 +554,36 @@ app.get("/api/campaigns", authenticateJWT, async (req, res) => {
   }
 });
 
+// Validate campaign exists (public - used by recorder to check before resuming)
+// Returns 200 if campaign exists and is active, 404 if not found, 410 if paused
+app.get("/api/campaigns/validate", async (req, res) => {
+  try {
+    const { name } = req.query;
+
+    if (!name) {
+      return res.status(400).json({ error: "Campaign name required" });
+    }
+
+    const campaign = await db.queryOne(
+      "SELECT id, name, is_paused FROM campaigns WHERE name = $1",
+      [name]
+    );
+
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found", exists: false });
+    }
+
+    if (campaign.is_paused) {
+      return res.status(410).json({ error: "Campaign is paused", exists: true, paused: true });
+    }
+
+    res.json({ exists: true, campaignId: campaign.id, name: campaign.name });
+  } catch (err) {
+    console.error("Error in GET /api/campaigns/validate:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Get campaign by ID (auth required)
 app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
@@ -884,22 +914,69 @@ app.post("/api/sessions/:sessionId/upload-url", async (req, res) => {
 
     const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 60 });
 
-    // Record the intent to upload in DB immediately
-    // If upload fails, we have a pointer to non-existent file (player handles gracefully)
-    await db.query(`
-      INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId]);
+    // NOTE: DB insert is now deferred to /confirm-chunk endpoint
+    // This prevents "phantom chunks" where DB has record but S3 upload failed
 
     console.log(`🎫 Presigned URL issued: ${sessionId} -> s3://${bucketName}/${s3Key} (seq: ${seqId})`);
 
     res.json({
       uploadUrl,
       s3Key,
+      s3Bucket: bucketName,
+      campaignId: campaignRecord.id,
       expiresIn: 60
     });
   } catch (err) {
     console.error("Error in POST /api/sessions/:sessionId/upload-url:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ----- Confirm Chunk: Called after successful S3 upload -----
+// This ensures DB only has records for chunks that actually exist in S3
+// Eliminates "phantom chunks" that cause playback failures
+app.post("/api/sessions/:sessionId/confirm-chunk", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { s3Key, s3Bucket, campaignId, chunkTimestamp, distinctId, pageUrl, sequenceId, host, domainToken } = req.body;
+
+    // Validate required fields
+    if (!sessionId || !s3Key || !s3Bucket || !campaignId || !chunkTimestamp || !distinctId || !host || !domainToken) {
+      return res.status(400).json({
+        error: "Missing required fields: sessionId, s3Key, s3Bucket, campaignId, chunkTimestamp, distinctId, host, domainToken"
+      });
+    }
+
+    // Validate domain token
+    if (!allowedDomains[host] || allowedDomains[host].token !== domainToken) {
+      return res.status(403).json({ error: "Invalid domain or token" });
+    }
+
+    const seqId = (sequenceId !== undefined && sequenceId !== null) ? parseInt(sequenceId, 10) : null;
+
+    // CRITICAL: Verify the file actually exists in S3 before recording in DB
+    try {
+      await s3Client.send(new HeadObjectCommand({ Bucket: s3Bucket, Key: s3Key }));
+    } catch (headErr) {
+      if (headErr.name === 'NotFound' || headErr.$metadata?.httpStatusCode === 404) {
+        console.error(`❌ Chunk confirmation failed - S3 object not found: ${s3Key}`);
+        return res.status(400).json({ error: "S3 object not found - upload may have failed" });
+      }
+      throw headErr; // Re-throw other errors
+    }
+
+    // S3 object exists - safe to insert into DB
+    await db.query(`
+      INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT DO NOTHING
+    `, [sessionId, distinctId, campaignId, s3Key, s3Bucket, pageUrl || null, chunkTimestamp, seqId]);
+
+    console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId})`);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error in POST /api/sessions/:sessionId/confirm-chunk:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -972,29 +1049,33 @@ app.post("/api/sessions/:sessionId/flush", async (req, res) => {
       isFinalFlush: true
     });
 
-    // Upload to S3 (async, but we respond immediately for sendBeacon)
-    s3.upload({
-      Bucket: bucketName,
-      Key: s3Key,
-      Body: sessionData,
-      ContentType: "application/json"
-    }).promise().then(() => {
-      console.log(`🚪 Final flush uploaded: ${sessionId} (${events.length} events)`);
-    }).catch(err => {
-      console.error(`🚨 Final flush S3 error for ${sessionId}:`, err.message);
-    });
-
-    // Record in DB immediately (fire-and-forget for sendBeacon response speed)
-    db.query(`
-      INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId])
-      .catch(err => console.error(`[DB] Flush chunk insert error: ${err.message}`));
-
     console.log(`🚪 Final flush received: ${sessionId} (${events.length} events, seq: ${seqId})`);
 
-    // Respond immediately (sendBeacon doesn't wait for response anyway)
-    res.status(202).json({ accepted: true });
+    // CRITICAL FIX: Await both S3 upload and DB insert before responding
+    // This ensures data is persisted even if the process is killed after response
+    try {
+      // First upload to S3
+      await s3.upload({
+        Bucket: bucketName,
+        Key: s3Key,
+        Body: sessionData,
+        ContentType: "application/json"
+      }).promise();
+
+      // Only insert to DB after S3 confirms (prevents phantom chunks)
+      await db.query(`
+        INSERT INTO session_chunks (session_id, distinct_id, campaign_id, s3_key, s3_bucket, page_url, timestamp, sequence_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT DO NOTHING
+      `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId]);
+
+      console.log(`🚪 Final flush uploaded: ${sessionId} (${events.length} events)`);
+      res.status(200).json({ accepted: true, persisted: true });
+    } catch (flushErr) {
+      console.error(`🚨 Final flush failed for ${sessionId}:`, flushErr.message);
+      // Return error so client knows flush failed (though sendBeacon may not read it)
+      res.status(500).json({ error: "Flush failed", message: flushErr.message });
+    }
   } catch (err) {
     console.error("Error in POST /api/sessions/:sessionId/flush:", err);
     res.status(500).json({ error: "Internal server error" });

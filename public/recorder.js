@@ -245,11 +245,15 @@
     return url.replace("/upload-session", "");
   }
 
+  // Track in-flight uploads to prevent duplicate sends
+  var uploadInProgress = false;
+
   function sendEvents() {
     console.log("[rrweb-send] sendEvents called", {
       eventsLength: events.length,
       currentCampaign: currentCampaign,
-      sessionId: sessionId
+      sessionId: sessionId,
+      uploadInProgress: uploadInProgress
     });
 
     if (events.length === 0) {
@@ -260,14 +264,22 @@
       console.log("[rrweb-send] Exiting: no currentCampaign");
       return;
     }
+    if (uploadInProgress) {
+      console.log("[rrweb-send] Exiting: upload already in progress, will retry next cycle");
+      return;
+    }
+
+    uploadInProgress = true;
 
     var chunkTimestamp = Date.now();
-    var eventsToSend = events.slice();
-    var currentSeq = chunkSequence++;
-    saveChunkSequence();
+    // CRITICAL: Take a snapshot but DO NOT clear events yet
+    var eventsSnapshot = events.slice();
+    var snapshotLength = eventsSnapshot.length;
+    var payloadSeq = chunkSequence; // Don't increment until confirmed
 
     var baseUrl = getServerBaseUrl();
     var uploadUrlEndpoint = baseUrl + "/api/sessions/" + sessionId + "/upload-url";
+    var confirmEndpoint = baseUrl + "/api/sessions/" + sessionId + "/confirm-chunk";
 
     var ticketPayload = {
       chunkTimestamp: chunkTimestamp,
@@ -276,12 +288,12 @@
       pageUrl: window.location.href,
       host: window.location.host,
       domainToken: DOMAIN_TOKEN,
-      sequenceId: currentSeq
+      sequenceId: payloadSeq
     };
 
     var recordingData = {
       sessionId: sessionId,
-      events: eventsToSend,
+      events: eventsSnapshot,
       pageUrl: window.location.href,
       timestamp: chunkTimestamp
     };
@@ -293,23 +305,26 @@
         compressed = fflate.gzipSync(fflate.strToU8(recordingJson));
       }
     } catch (err) {
+      uploadInProgress = false;
       return;
     }
 
     if (!compressed) {
+      uploadInProgress = false;
       return;
     }
 
-    events = [];
-    saveEvents();
+    // Store metadata for confirmation step
+    var uploadMetadata = null;
 
     console.log("[rrweb-send] Requesting presigned URL", {
       endpoint: uploadUrlEndpoint,
-      eventCount: eventsToSend.length,
-      seq: currentSeq,
+      eventCount: snapshotLength,
+      seq: payloadSeq,
       compressedSize: compressed.length + " bytes"
     });
 
+    // Step 1: Get presigned URL
     fetch(uploadUrlEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -326,25 +341,75 @@
       return res.json();
     })
     .then(function(data) {
+      // Save metadata for confirmation
+      uploadMetadata = data;
       var uploadUrl = data.uploadUrl;
       console.log("[rrweb-send] Got presigned URL, uploading to S3...");
 
+      // Step 2: Upload to S3
       return fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Type": "application/gzip" },
         body: compressed,
         keepalive: true
-      }).then(function(s3Res) {
-        console.log("[rrweb-send] S3 upload response:", s3Res.status, s3Res.ok ? "OK" : "FAILED");
-        if (!s3Res.ok) {
-          return s3Res.text().then(function(text) {
-            console.error("[rrweb-send] S3 error body:", text);
-          });
-        }
       });
     })
+    .then(function(s3Res) {
+      console.log("[rrweb-send] S3 upload response:", s3Res.status, s3Res.ok ? "OK" : "FAILED");
+      if (!s3Res.ok) {
+        return s3Res.text().then(function(text) {
+          throw new Error("S3 upload failed: " + s3Res.status + " - " + text);
+        });
+      }
+
+      // Step 3: Confirm chunk with server (this creates the DB record)
+      console.log("[rrweb-send] S3 upload succeeded, confirming chunk...");
+      return fetch(confirmEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          s3Key: uploadMetadata.s3Key,
+          s3Bucket: uploadMetadata.s3Bucket,
+          campaignId: uploadMetadata.campaignId,
+          chunkTimestamp: chunkTimestamp,
+          distinctId: distinctId,
+          pageUrl: window.location.href,
+          sequenceId: payloadSeq,
+          host: window.location.host,
+          domainToken: DOMAIN_TOKEN
+        }),
+        keepalive: true
+      });
+    })
+    .then(function(confirmRes) {
+      console.log("[rrweb-send] Confirm response:", confirmRes.status);
+      if (!confirmRes.ok) {
+        return confirmRes.text().then(function(text) {
+          throw new Error("Chunk confirmation failed: " + confirmRes.status + " - " + text);
+        });
+      }
+      return confirmRes.json();
+    })
+    .then(function(confirmData) {
+      // SUCCESS: Now safe to remove the events we uploaded
+      console.log("[rrweb-send] ✅ Chunk confirmed, removing " + snapshotLength + " events from buffer");
+
+      // Remove exactly the events we uploaded (splice from front)
+      // This handles case where new events arrived during upload
+      events.splice(0, snapshotLength);
+      saveEvents();
+
+      // Only increment sequence on success
+      chunkSequence++;
+      saveChunkSequence();
+
+      uploadInProgress = false;
+    })
     .catch(function(err) {
-      console.error("[rrweb-send] Error:", err.message || err);
+      console.error("[rrweb-send] ❌ Upload failed, retaining events for retry:", err.message || err);
+      // DO NOT clear events - they remain in buffer for next retry cycle
+      // Next interval will attempt to upload old + new events together
+      uploadInProgress = false;
     });
   }
 
@@ -531,11 +596,49 @@
       return;
     }
 
-    console.log("[rrweb-record] Resuming recording for campaign:", savedCampaign);
-    startRecordingInternal({
-      campaign: savedCampaign,
-      timeout: getRemainingTimeout() || undefined
-    });
+    // CRITICAL: Validate campaign still exists before resuming
+    // Prevents recording into a void if campaign was deleted
+    var baseUrl = getServerBaseUrl();
+    var validateUrl = baseUrl + "/api/campaigns/validate?name=" + encodeURIComponent(savedCampaign);
+
+    console.log("[rrweb-record] Validating campaign exists:", savedCampaign);
+
+    fetch(validateUrl)
+      .then(function(res) {
+        if (res.status === 404) {
+          // Campaign was deleted - clear localStorage and don't resume
+          console.warn("[rrweb-record] ❌ Campaign no longer exists:", savedCampaign);
+          localStorage.removeItem(CAMPAIGN_KEY);
+          localStorage.removeItem(SESSION_ID_KEY);
+          localStorage.removeItem(EVENTS_KEY);
+          localStorage.removeItem(CHUNK_SEQUENCE_KEY);
+          clearTimeoutState();
+          return;
+        }
+
+        if (res.status === 410) {
+          // Campaign is paused - don't resume, but keep localStorage for when it unpauses
+          console.warn("[rrweb-record] ⏸️ Campaign is paused:", savedCampaign);
+          return;
+        }
+
+        if (!res.ok) {
+          // Server error - try again next time (don't clear state)
+          console.error("[rrweb-record] Campaign validation failed:", res.status);
+          return;
+        }
+
+        // Campaign exists and is active - safe to resume
+        console.log("[rrweb-record] ✅ Campaign validated, resuming recording:", savedCampaign);
+        startRecordingInternal({
+          campaign: savedCampaign,
+          timeout: getRemainingTimeout() || undefined
+        });
+      })
+      .catch(function(err) {
+        // Network error - try again next time (don't clear state)
+        console.error("[rrweb-record] Campaign validation network error:", err);
+      });
   }
 
   function runAutopilot(rules) {
