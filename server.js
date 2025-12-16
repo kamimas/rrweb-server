@@ -117,11 +117,13 @@ app.use(helmet({
 app.use(express.raw({ type: "text/plain", limit: "5mb" }));
 app.use(express.json({ limit: "5mb" }));
 
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-});
-app.use(limiter);
+// Rate limiting disabled - was causing 429 errors on admin panel
+// TODO: Re-enable with separate limits for public vs admin routes
+// const limiter = rateLimit({
+//   windowMs: 60 * 1000,
+//   max: 60,
+// });
+// app.use(limiter);
 
 // ----- Configuration Endpoint -----
 app.get("/config", (req, res) => {
