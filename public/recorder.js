@@ -56,6 +56,7 @@
   var CAMPAIGN_KEY = "rrweb_campaign";
   var TIMEOUT_START_KEY = "rrweb_timeout_start";
   var TIMEOUT_DURATION_KEY = "rrweb_timeout_duration";
+  var CHUNK_SEQUENCE_KEY = "rrweb_chunk_sequence";
 
   // Constants
   var IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -145,9 +146,16 @@
       var newSessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
       localStorage.setItem(SESSION_ID_KEY, newSessionId);
       localStorage.removeItem(EVENTS_KEY);
+      localStorage.removeItem(CHUNK_SEQUENCE_KEY);
       events = [];
       chunkSequence = 0;
       return newSessionId;
+    }
+
+    // Restore chunkSequence for existing session
+    var storedSeq = localStorage.getItem(CHUNK_SEQUENCE_KEY);
+    if (storedSeq) {
+      chunkSequence = parseInt(storedSeq, 10) || 0;
     }
 
     return existingSessionId;
@@ -172,6 +180,14 @@
   function saveEvents() {
     try {
       localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
+    } catch (err) {
+      // Ignore save errors
+    }
+  }
+
+  function saveChunkSequence() {
+    try {
+      localStorage.setItem(CHUNK_SEQUENCE_KEY, chunkSequence.toString());
     } catch (err) {
       // Ignore save errors
     }
@@ -248,6 +264,7 @@
     var chunkTimestamp = Date.now();
     var eventsToSend = events.slice();
     var currentSeq = chunkSequence++;
+    saveChunkSequence();
 
     var baseUrl = getServerBaseUrl();
     var uploadUrlEndpoint = baseUrl + "/api/sessions/" + sessionId + "/upload-url";
@@ -335,6 +352,7 @@
     }
 
     var currentSeq = chunkSequence++;
+    saveChunkSequence();
     var baseUrl = getServerBaseUrl();
     var flushUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + currentSeq;
 
@@ -354,14 +372,18 @@
       domainToken: DOMAIN_TOKEN
     };
 
+    // Use fetch with keepalive - more reliable than sendBeacon and gives feedback
     try {
-      if (navigator.sendBeacon) {
-        var blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-        var result = navigator.sendBeacon(flushUrl, blob);
-        console.log("[rrweb-flush] sendBeacon result:", result);
-      } else {
-        console.log("[rrweb-flush] sendBeacon not available!");
-      }
+      fetch(flushUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).then(function(res) {
+        console.log("[rrweb-flush] fetch result:", res.status);
+      }).catch(function(err) {
+        console.error("[rrweb-flush] fetch error:", err);
+      });
     } catch (err) {
       console.error("[rrweb-flush] Error:", err);
     }
