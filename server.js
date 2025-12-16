@@ -1144,13 +1144,9 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
     }
 
-    // Validate step filters
-    if (reached_step && typeof reached_step !== 'string') {
-      return res.status(400).json({ error: "reached_step must be a string" });
-    }
-    if (not_reached_step && typeof not_reached_step !== 'string') {
-      return res.status(400).json({ error: "not_reached_step must be a string" });
-    }
+    // Parse step filters (comma-separated for multiple steps)
+    const reachedSteps = reached_step ? reached_step.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const notReachedSteps = not_reached_step ? not_reached_step.split(',').map(s => s.trim()).filter(Boolean) : [];
 
     let params = [];
     let paramIndex = 1;
@@ -1213,22 +1209,24 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     }
 
     // Step filters using EXISTS for efficiency (avoids JOIN multiplication)
-    if (reached_step) {
+    // Each reached step gets its own EXISTS clause (must have reached ALL specified steps)
+    for (const step of reachedSteps) {
       whereClauses.push(`EXISTS (
         SELECT 1 FROM session_steps ss_reached
         WHERE ss_reached.session_id = sc.session_id
         AND ss_reached.step_key = $${paramIndex++}
       )`);
-      params.push(reached_step);
+      params.push(step);
     }
 
-    if (not_reached_step) {
+    // Each not_reached step gets its own NOT EXISTS clause (must NOT have reached ANY specified step)
+    for (const step of notReachedSteps) {
       whereClauses.push(`NOT EXISTS (
         SELECT 1 FROM session_steps ss_missing
         WHERE ss_missing.session_id = sc.session_id
         AND ss_missing.step_key = $${paramIndex++}
       )`);
-      params.push(not_reached_step);
+      params.push(step);
     }
 
     if (whereClauses.length > 0) {
