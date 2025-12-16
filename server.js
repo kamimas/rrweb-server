@@ -536,7 +536,7 @@ app.post("/api/campaigns", authenticateJWT, async (req, res) => {
 app.get("/api/campaigns", authenticateJWT, async (req, res) => {
   try {
     const { rows: campaigns } = await db.query(`
-      SELECT c.id, c.name, c.created_at,
+      SELECT c.id, c.name, c.created_at, c.is_paused,
         (SELECT COUNT(DISTINCT sc.session_id) FROM session_chunks sc WHERE sc.campaign_id = c.id) as session_count,
         (SELECT COUNT(DISTINCT sc2.session_id) FROM session_chunks sc2
          LEFT JOIN sessions s ON sc2.session_id = s.session_id
@@ -559,7 +559,7 @@ app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const campaign = await db.queryOne(`
-      SELECT id, name, created_at, mission_brief, funnel_config, generated_rubric, ai_report, ai_analysis_status
+      SELECT id, name, created_at, mission_brief, funnel_config, generated_rubric, ai_report, ai_analysis_status, is_paused
       FROM campaigns WHERE id = $1
     `, [id]);
 
@@ -682,6 +682,31 @@ app.put("/api/campaigns/:id", authenticateJWT, async (req, res) => {
     });
   } catch (err) {
     console.error("Error in PUT /api/campaigns/:id:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Pause/unpause a campaign (auth required)
+app.patch("/api/campaigns/:id/pause", authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_paused } = req.body;
+
+    if (typeof is_paused !== "boolean") {
+      return res.status(400).json({ error: "is_paused must be a boolean" });
+    }
+
+    const campaign = await db.queryOne(`SELECT id, name FROM campaigns WHERE id = $1`, [id]);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    await db.query(`UPDATE campaigns SET is_paused = $1 WHERE id = $2`, [is_paused, id]);
+
+    console.log(`${is_paused ? "⏸️" : "▶️"} Campaign ${is_paused ? "paused" : "resumed"}: ${campaign.name}`);
+    res.json({ id: parseInt(id), is_paused });
+  } catch (err) {
+    console.error("Error in PATCH /api/campaigns/:id/pause:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

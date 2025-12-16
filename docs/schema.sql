@@ -23,7 +23,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     ai_analysis_status VARCHAR(50) DEFAULT 'pending', -- pending, analyzing, complete, error
 
     -- Funnel Tracking
-    funnel_config TEXT                            -- Step definitions for funnel tracking (JSON)
+    funnel_config TEXT,                           -- Step definitions for funnel tracking (JSON)
+
+    -- Campaign State
+    is_paused BOOLEAN DEFAULT FALSE               -- Paused campaigns don't record new sessions
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
