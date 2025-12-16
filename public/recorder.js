@@ -230,10 +230,18 @@
   }
 
   function sendEvents() {
+    console.log("[rrweb-send] sendEvents called", {
+      eventsLength: events.length,
+      currentCampaign: currentCampaign,
+      sessionId: sessionId
+    });
+
     if (events.length === 0) {
+      console.log("[rrweb-send] Exiting: events.length === 0");
       return;
     }
     if (!currentCampaign) {
+      console.log("[rrweb-send] Exiting: no currentCampaign");
       return;
     }
 
@@ -306,13 +314,35 @@
   }
 
   function flushEvents() {
-    if (events.length === 0) return;
-    if (!currentCampaign) return;
-    if (!sessionId) return;
+    console.log("[rrweb-flush] flushEvents called", {
+      eventsLength: events.length,
+      currentCampaign: currentCampaign,
+      sessionId: sessionId,
+      isRecordingActive: isRecordingActive
+    });
+
+    if (events.length === 0) {
+      console.log("[rrweb-flush] Exiting: events.length === 0");
+      return;
+    }
+    if (!currentCampaign) {
+      console.log("[rrweb-flush] Exiting: no currentCampaign");
+      return;
+    }
+    if (!sessionId) {
+      console.log("[rrweb-flush] Exiting: no sessionId");
+      return;
+    }
 
     var currentSeq = chunkSequence++;
     var baseUrl = getServerBaseUrl();
     var flushUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + currentSeq;
+
+    console.log("[rrweb-flush] Sending flush", {
+      flushUrl: flushUrl,
+      eventCount: events.length,
+      seq: currentSeq
+    });
 
     var payload = {
       events: events,
@@ -327,10 +357,13 @@
     try {
       if (navigator.sendBeacon) {
         var blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-        navigator.sendBeacon(flushUrl, blob);
+        var result = navigator.sendBeacon(flushUrl, blob);
+        console.log("[rrweb-flush] sendBeacon result:", result);
+      } else {
+        console.log("[rrweb-flush] sendBeacon not available!");
       }
     } catch (err) {
-      // Ignore errors on unload
+      console.error("[rrweb-flush] Error:", err);
     }
 
     events = [];
@@ -742,18 +775,21 @@
     }, 60000);
 
     document.addEventListener("visibilitychange", function() {
+      console.log("[rrweb-flush] visibilitychange:", document.visibilityState, "isRecordingActive:", isRecordingActive);
       if (document.visibilityState === "hidden" && isRecordingActive) {
         flushEvents();
       }
     });
 
     window.addEventListener("beforeunload", function() {
+      console.log("[rrweb-flush] beforeunload fired, isRecordingActive:", isRecordingActive);
       if (isRecordingActive) {
         flushEvents();
       }
     });
 
     window.addEventListener("pagehide", function() {
+      console.log("[rrweb-flush] pagehide fired, isRecordingActive:", isRecordingActive);
       if (isRecordingActive) {
         flushEvents();
       }
