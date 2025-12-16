@@ -303,6 +303,13 @@
     events = [];
     saveEvents();
 
+    console.log("[rrweb-send] Requesting presigned URL", {
+      endpoint: uploadUrlEndpoint,
+      eventCount: eventsToSend.length,
+      seq: currentSeq,
+      compressedSize: compressed.length + " bytes"
+    });
+
     fetch(uploadUrlEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -310,23 +317,34 @@
       keepalive: true
     })
     .then(function(res) {
+      console.log("[rrweb-send] Presigned URL response:", res.status);
       if (!res.ok) {
-        throw new Error("Failed to get upload URL: " + res.status);
+        return res.text().then(function(text) {
+          throw new Error("Failed to get upload URL: " + res.status + " - " + text);
+        });
       }
       return res.json();
     })
     .then(function(data) {
       var uploadUrl = data.uploadUrl;
+      console.log("[rrweb-send] Got presigned URL, uploading to S3...");
 
       return fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Type": "application/gzip" },
         body: compressed,
         keepalive: true
+      }).then(function(s3Res) {
+        console.log("[rrweb-send] S3 upload response:", s3Res.status, s3Res.ok ? "OK" : "FAILED");
+        if (!s3Res.ok) {
+          return s3Res.text().then(function(text) {
+            console.error("[rrweb-send] S3 error body:", text);
+          });
+        }
       });
     })
-    .catch(function() {
-      // Silent failure
+    .catch(function(err) {
+      console.error("[rrweb-send] Error:", err.message || err);
     });
   }
 
@@ -421,9 +439,16 @@
     updateLastActivity();
     loadStoredEvents();
 
+    console.log("[rrweb-record] Starting recording", {
+      campaign: currentCampaign,
+      sessionId: sessionId,
+      timeout: options.timeout
+    });
+
     loadLibraries()
       .then(function() {
         try {
+          console.log("[rrweb-record] Libraries loaded, initializing rrweb.record()");
           stopFn = rrweb.record({
             emit: function(event) {
               events.push(event);
@@ -432,6 +457,7 @@
             }
           });
           isRecordingActive = true;
+          console.log("[rrweb-record] Recording active, events will flush in 500ms");
 
           setTimeout(function() {
             sendEvents();
@@ -446,10 +472,18 @@
   }
 
   function stopRecordingInternal() {
+    console.log("[rrweb-record] stopRecording called", {
+      isRecordingActive: isRecordingActive,
+      sessionId: sessionId,
+      eventsLength: events.length
+    });
+
     if (!isRecordingActive) {
+      console.log("[rrweb-record] stopRecording ignored - not recording");
       return;
     }
 
+    console.log("[rrweb-record] Sending final events before stop...");
     sendEvents();
 
     if (typeof stopFn === "function") {
@@ -463,6 +497,7 @@
     localStorage.removeItem(CAMPAIGN_KEY);
     localStorage.removeItem(SESSION_ID_KEY);
     sessionId = null;
+    console.log("[rrweb-record] Recording stopped, session cleared");
   }
 
   function isRecordingInternal() {
@@ -475,16 +510,28 @@
 
   function tryResumeRecording() {
     var savedCampaign = localStorage.getItem(CAMPAIGN_KEY);
+    var savedSession = localStorage.getItem(SESSION_ID_KEY);
+    var savedSeq = localStorage.getItem(CHUNK_SEQUENCE_KEY);
+
+    console.log("[rrweb-record] tryResumeRecording", {
+      savedCampaign: savedCampaign,
+      savedSession: savedSession,
+      savedSeq: savedSeq
+    });
+
     if (!savedCampaign) {
+      console.log("[rrweb-record] No saved campaign, not resuming");
       return;
     }
 
     if (isTimeoutExpired()) {
+      console.log("[rrweb-record] Timeout expired, clearing session");
       clearTimeoutState();
       localStorage.removeItem(CAMPAIGN_KEY);
       return;
     }
 
+    console.log("[rrweb-record] Resuming recording for campaign:", savedCampaign);
     startRecordingInternal({
       campaign: savedCampaign,
       timeout: getRemainingTimeout() || undefined
