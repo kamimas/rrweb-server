@@ -414,36 +414,13 @@
   }
 
   function flushEvents() {
-    console.log("[rrweb-flush] flushEvents called", {
-      eventsLength: events.length,
-      currentCampaign: currentCampaign,
-      sessionId: sessionId,
-      isRecordingActive: isRecordingActive
-    });
+    // Best-effort backup during page unload.
+    // Does NOT clear events or increment sequence.
+    // If navigation: next page uploads via sendEvents(), server dedupes.
+    // If tab close: sendBeacon delivers, data safe.
 
-    if (events.length === 0) {
-      console.log("[rrweb-flush] Exiting: events.length === 0");
-      return;
-    }
-    if (!currentCampaign) {
-      console.log("[rrweb-flush] Exiting: no currentCampaign");
-      return;
-    }
-    if (!sessionId) {
-      console.log("[rrweb-flush] Exiting: no sessionId");
-      return;
-    }
-
-    var currentSeq = chunkSequence++;
-    saveChunkSequence();
-    var baseUrl = getServerBaseUrl();
-    var flushUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + currentSeq;
-
-    console.log("[rrweb-flush] Sending flush", {
-      flushUrl: flushUrl,
-      eventCount: events.length,
-      seq: currentSeq
-    });
+    if (events.length === 0) return;
+    if (!currentCampaign || !sessionId) return;
 
     var payload = {
       events: events,
@@ -455,24 +432,37 @@
       domainToken: DOMAIN_TOKEN
     };
 
-    // Use fetch with keepalive - more reliable than sendBeacon and gives feedback
-    try {
-      fetch(flushUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: true
-      }).then(function(res) {
-        console.log("[rrweb-flush] fetch result:", res.status);
-      }).catch(function(err) {
-        console.error("[rrweb-flush] fetch error:", err);
-      });
-    } catch (err) {
-      console.error("[rrweb-flush] Error:", err);
+    // Construct URL with current sequence (do NOT increment)
+    var baseUrl = getServerBaseUrl();
+    var beaconUrl = baseUrl + "/api/sessions/" + sessionId + "/flush?seq=" + chunkSequence;
+
+    // Use Blob for sendBeacon (Content-Type: application/json)
+    var blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+
+    // Try sendBeacon first (designed for unload)
+    var sent = false;
+    if (navigator.sendBeacon) {
+      sent = navigator.sendBeacon(beaconUrl, blob);
     }
 
-    events = [];
-    saveEvents();
+    // Fallback for older browsers or if beacon queue is full
+    if (!sent) {
+      try {
+        fetch(beaconUrl, {
+          method: "POST",
+          body: blob,
+          keepalive: true
+        }).catch(function() {
+          // Silent fail - data remains in localStorage for next page
+        });
+      } catch (e) {
+        // Silent fail
+      }
+    }
+
+    // CRITICAL: Do NOT clear events or increment sequence.
+    // If navigating, next page will read from localStorage and upload via sendEvents().
+    // Server ON CONFLICT DO NOTHING handles duplicate sequence IDs.
   }
 
   function startRecordingInternal(options) {
