@@ -1133,7 +1133,7 @@ app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
 // List sessions (auth required)
 app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
-    const { campaign_id, campaign, email, status } = req.query;
+    const { campaign_id, campaign, email, status, reached_step, not_reached_step } = req.query;
 
     if (!campaign_id && !campaign && !email) {
       return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
@@ -1142,6 +1142,14 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     // Validate status if provided
     if (status && !["completed", "dropped_off"].includes(status)) {
       return res.status(400).json({ error: "Invalid status. Must be 'completed' or 'dropped_off'" });
+    }
+
+    // Validate step filters
+    if (reached_step && typeof reached_step !== 'string') {
+      return res.status(400).json({ error: "reached_step must be a string" });
+    }
+    if (not_reached_step && typeof not_reached_step !== 'string') {
+      return res.status(400).json({ error: "not_reached_step must be a string" });
     }
 
     let params = [];
@@ -1202,6 +1210,25 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         whereClauses.push(`s.status = $${paramIndex++}`);
         params.push(status);
       }
+    }
+
+    // Step filters using EXISTS for efficiency (avoids JOIN multiplication)
+    if (reached_step) {
+      whereClauses.push(`EXISTS (
+        SELECT 1 FROM session_steps ss_reached
+        WHERE ss_reached.session_id = sc.session_id
+        AND ss_reached.step_key = $${paramIndex++}
+      )`);
+      params.push(reached_step);
+    }
+
+    if (not_reached_step) {
+      whereClauses.push(`NOT EXISTS (
+        SELECT 1 FROM session_steps ss_missing
+        WHERE ss_missing.session_id = sc.session_id
+        AND ss_missing.step_key = $${paramIndex++}
+      )`);
+      params.push(not_reached_step);
     }
 
     if (whereClauses.length > 0) {
