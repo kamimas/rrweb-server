@@ -18,6 +18,7 @@ const queue = require("./src/queue-manager");
 const aiAnalyst = require("./src/ai-analyst");
 const s3Helpers = require("./src/s3-helpers");
 const { generateTimeline } = require("./timeline-react-aware");
+const { getLocationFromRequest } = require("./src/utils/geo");
 
 // ----- Session Playback Cache -----
 // TTL: 10 minutes, check for expired keys every 2 minutes
@@ -64,6 +65,11 @@ console.log("✅ Using PostgreSQL database");
 // All queries are now async - use await db.query() or db.queryOne()
 
 const app = express();
+
+// ----- Trust Proxy -----
+// Required for accurate IP detection behind AWS LB, Nginx, or other reverse proxies
+// Without this, request-ip would return the load balancer's IP, not the client's
+app.set('trust proxy', true);
 
 // ----- CORS Middleware -----
 app.use((req, res, next) => {
@@ -974,7 +980,33 @@ app.post("/api/sessions/:sessionId/confirm-chunk", async (req, res) => {
       ON CONFLICT DO NOTHING
     `, [sessionId, distinctId, campaignId, s3Key, s3Bucket, pageUrl || null, chunkTimestamp, seqId]);
 
-    console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId})`);
+    // Ensure session row exists (for location update below)
+    await db.query(`
+      INSERT INTO sessions (session_id, updated_at)
+      VALUES ($1, $2)
+      ON CONFLICT (session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at
+    `, [sessionId, Date.now()]);
+
+    // Capture location data from client IP - ONLY on first chunk
+    // The WHERE clause makes chunks 2-N effectively free (no GeoIP lookup, no DB write)
+    const existingLocation = await db.queryOne(
+      `SELECT location_country FROM sessions WHERE session_id = $1`,
+      [sessionId]
+    );
+
+    let locLog = 'already set';
+    if (!existingLocation?.location_country) {
+      // First chunk for this session - do the GeoIP lookup
+      const loc = getLocationFromRequest(req);
+      await db.query(`
+        UPDATE sessions
+        SET location_country = $1, location_city = $2, location_region = $3, ip_address = $4
+        WHERE session_id = $5 AND location_country IS NULL
+      `, [loc.country, loc.city, loc.region, loc.ip, sessionId]);
+      locLog = `${loc.country}/${loc.city}`;
+    }
+
+    console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId}, loc: ${locLog})`);
 
     res.json({ success: true });
   } catch (err) {
@@ -1133,7 +1165,7 @@ app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
 // List sessions (auth required)
 app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
-    const { campaign_id, campaign, email, status, reached_step, not_reached_step } = req.query;
+    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city } = req.query;
 
     if (!campaign_id && !campaign && !email) {
       return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
@@ -1165,6 +1197,9 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         s.assets_status,
         s.ai_diagnosis,
         s.furthest_step_index,
+        s.location_country,
+        s.location_city,
+        s.location_region,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
         (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
@@ -1229,12 +1264,22 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       params.push(step);
     }
 
+    // Location filters
+    if (country) {
+      whereClauses.push(`s.location_country = $${paramIndex++}`);
+      params.push(country.toUpperCase()); // ISO codes are uppercase
+    }
+    if (city) {
+      whereClauses.push(`LOWER(s.location_city) = LOWER($${paramIndex++})`);
+      params.push(city);
+    }
+
     if (whereClauses.length > 0) {
       baseQuery += " WHERE " + whereClauses.join(" AND ");
     }
 
     baseQuery += `
-      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region
       ORDER BY first_timestamp DESC
     `;
 

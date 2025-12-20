@@ -78,11 +78,18 @@ CREATE TABLE IF NOT EXISTS sessions (
     ai_progress INTEGER,                          -- Progress percentage (0-100)
 
     -- Funnel Progress Tracking
-    furthest_step_index INTEGER DEFAULT -1        -- Index of furthest step reached
+    furthest_step_index INTEGER DEFAULT -1,       -- Index of furthest step reached
+
+    -- Location Data (IP Geolocation)
+    location_country VARCHAR(2),                  -- ISO 2-letter code (US, CA, FR)
+    location_city VARCHAR(100),                   -- City name (Toronto, San Francisco)
+    location_region VARCHAR(100),                 -- State/Province code (ON, CA)
+    ip_address VARCHAR(45)                        -- IPv6/IPv4 (optional, for audit)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_assets_status ON sessions(assets_status);
+CREATE INDEX IF NOT EXISTS idx_sessions_location_country ON sessions(location_country);
 
 -- =============================================================================
 -- SESSION CHUNKS TABLE
@@ -148,7 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_session_steps_session_id ON session_steps(session
 -- HELPER VIEWS (Optional, for convenience)
 -- =============================================================================
 
--- View: Sessions with user emails
+-- View: Sessions with user emails and location
 CREATE OR REPLACE VIEW sessions_with_users AS
 SELECT
     s.session_id,
@@ -157,6 +164,9 @@ SELECT
     s.assets_status,
     s.ai_diagnosis,
     s.furthest_step_index,
+    s.location_country,
+    s.location_city,
+    s.location_region,
     u.email as user_email,
     sc.campaign_id,
     c.name as campaign_name,
