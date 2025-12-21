@@ -1045,6 +1045,26 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
       ORDER BY ps.added_at DESC
     `, [problemId]);
 
+    // Batch fetch all session IDs for efficient lookups
+    const sessionIds = sessions.map(s => s.session_id);
+
+    // Batch fetch ALL problems for these sessions (shows other cohorts they belong to)
+    const { rows: problemLinks } = sessionIds.length > 0 ? await db.query(`
+      SELECT ps.session_id, cp.id as problem_id, cp.title as problem_title
+      FROM problem_sessions ps
+      JOIN campaign_problems cp ON ps.problem_id = cp.id
+      WHERE ps.session_id = ANY($1)
+    `, [sessionIds]) : { rows: [] };
+
+    // Build session -> problems map
+    const problemsMap = {};
+    for (const link of problemLinks) {
+      if (!problemsMap[link.session_id]) {
+        problemsMap[link.session_id] = [];
+      }
+      problemsMap[link.session_id].push({ id: link.problem_id, title: link.problem_title });
+    }
+
     // Transform sessions to match GET /api/sessions response format
     const transformedSessions = await Promise.all(sessions.map(async (session) => {
       // Get email if linked
@@ -1074,7 +1094,8 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
         watched: session.watched === true,
         email: emailResult?.email || null,
         playback_url: `/api/sessions/${session.session_id}/playback`,
-        furthest_step_key
+        furthest_step_key,
+        problems: problemsMap[session.session_id] || []
       };
     }));
 
@@ -1122,6 +1143,53 @@ app.delete("/api/problems/:problemId", authenticateJWT, async (req, res) => {
     });
   } catch (err) {
     console.error("Error in DELETE /api/problems/:problemId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Update a problem cohort (title/description)
+app.patch("/api/problems/:problemId", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+    const { title, description } = req.body;
+
+    // Verify problem exists
+    const problem = await db.queryOne(
+      "SELECT id, title, description, campaign_id, created_at FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // At least one field must be provided
+    if (title === undefined && description === undefined) {
+      return res.status(400).json({ error: "At least one of title or description must be provided" });
+    }
+
+    // Validate title if provided
+    if (title !== undefined && (!title || !title.trim())) {
+      return res.status(400).json({ error: "Title cannot be empty" });
+    }
+
+    const newTitle = title !== undefined ? title.trim() : problem.title;
+    const newDescription = description !== undefined ? (description || null) : problem.description;
+
+    await db.query(
+      "UPDATE campaign_problems SET title = $1, description = $2 WHERE id = $3",
+      [newTitle, newDescription, problemId]
+    );
+
+    console.log(`📝 Problem updated: "${problem.title}" -> "${newTitle}"`);
+    res.json({
+      id: problem.id,
+      campaign_id: problem.campaign_id,
+      title: newTitle,
+      description: newDescription,
+      created_at: problem.created_at
+    });
+  } catch (err) {
+    console.error("Error in PATCH /api/problems/:problemId:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -1611,6 +1679,26 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
 
     const { rows: sessions } = await db.query(baseQuery, params);
 
+    // Batch fetch all session IDs for efficient lookups
+    const sessionIds = sessions.map(s => s.session_id);
+
+    // Batch fetch problems for all sessions (avoids N+1)
+    const { rows: problemLinks } = sessionIds.length > 0 ? await db.query(`
+      SELECT ps.session_id, cp.id as problem_id, cp.title as problem_title
+      FROM problem_sessions ps
+      JOIN campaign_problems cp ON ps.problem_id = cp.id
+      WHERE ps.session_id = ANY($1)
+    `, [sessionIds]) : { rows: [] };
+
+    // Build session -> problems map
+    const problemsMap = {};
+    for (const link of problemLinks) {
+      if (!problemsMap[link.session_id]) {
+        problemsMap[link.session_id] = [];
+      }
+      problemsMap[link.session_id].push({ id: link.problem_id, title: link.problem_title });
+    }
+
     // Add playback_url, normalize status, and get email for each session
     const transformedSessions = await Promise.all(sessions.map(async (session) => {
       // Get email if linked
@@ -1640,7 +1728,8 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         watched: session.watched === true,
         email: emailResult?.email || null,
         playback_url: `/api/sessions/${session.session_id}/playback`,
-        furthest_step_key
+        furthest_step_key,
+        problems: problemsMap[session.session_id] || []
       };
     }));
 
