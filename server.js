@@ -544,6 +544,15 @@ app.post("/api/campaigns", authenticateJWT, async (req, res) => {
 // List campaigns (auth required)
 app.get("/api/campaigns", authenticateJWT, async (req, res) => {
   try {
+    // Pagination params
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const offset = (page - 1) * limit;
+
+    // Get total count
+    const countResult = await db.queryOne("SELECT COUNT(*) as total FROM campaigns");
+    const total = parseInt(countResult.total);
+
     // Single query with JOIN instead of 3 correlated subqueries per campaign
     const { rows: campaigns } = await db.query(`
       SELECT c.id, c.name, c.created_at, c.is_paused,
@@ -554,8 +563,21 @@ app.get("/api/campaigns", authenticateJWT, async (req, res) => {
       LEFT JOIN sessions s ON s.campaign_id = c.id
       GROUP BY c.id, c.name, c.created_at, c.is_paused
       ORDER BY c.created_at DESC
-    `);
-    res.json({ campaigns });
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
+
+    const total_pages = Math.ceil(total / limit);
+    res.json({
+      campaigns,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages,
+        has_next: page < total_pages,
+        has_prev: page > 1
+      }
+    });
   } catch (err) {
     console.error("Error in GET /api/campaigns:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -990,6 +1012,11 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
   try {
     const { problemId } = req.params;
 
+    // Pagination params
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const offset = (page - 1) * limit;
+
     // Verify problem exists
     const problem = await db.queryOne(
       "SELECT id, campaign_id, title FROM campaign_problems WHERE id = $1",
@@ -998,6 +1025,13 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
     if (!problem) {
       return res.status(404).json({ error: "Problem not found" });
     }
+
+    // Get total count for pagination
+    const countResult = await db.queryOne(
+      "SELECT COUNT(*) as total FROM problem_sessions WHERE problem_id = $1",
+      [problemId]
+    );
+    const total = parseInt(countResult?.total || 0);
 
     // Reuse the same query structure as GET /api/sessions for consistent response format
     const { rows: sessions } = await db.query(`
@@ -1034,7 +1068,8 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
                s.furthest_step_index, s.location_country, s.location_city, s.location_region,
                s.device_os, s.device_browser, s.device_type, ps.added_at
       ORDER BY ps.added_at DESC
-    `, [problemId]);
+      LIMIT $2 OFFSET $3
+    `, [problemId, limit, offset]);
 
     // Batch fetch all IDs for efficient lookups
     const sessionIds = sessions.map(s => s.session_id);
@@ -1098,13 +1133,22 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
       };
     });
 
+    const total_pages = Math.ceil(total / limit);
     res.json({
       problem: {
         id: problem.id,
         title: problem.title,
         campaign_id: problem.campaign_id
       },
-      sessions: transformedSessions
+      sessions: transformedSessions,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages,
+        has_next: page < total_pages,
+        has_prev: page > 1
+      }
     });
   } catch (err) {
     console.error("Error in GET /api/problems/:problemId/sessions:", err);
@@ -1543,6 +1587,11 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
     const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type } = req.query;
 
+    // Pagination params
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const offset = (page - 1) * limit;
+
     if (!campaign_id && !campaign && !email) {
       return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
     }
@@ -1667,14 +1716,39 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       params.push(device_type);
     }
 
+    // Build WHERE clause string
+    let whereClause = "";
     if (whereClauses.length > 0) {
-      baseQuery += " WHERE " + whereClauses.join(" AND ");
+      whereClause = " WHERE " + whereClauses.join(" AND ");
     }
+
+    // Count query for pagination (uses same filters)
+    let countQuery = `
+      SELECT COUNT(DISTINCT sc.session_id) as total
+      FROM session_chunks sc
+      LEFT JOIN campaigns c ON sc.campaign_id = c.id
+      LEFT JOIN sessions s ON sc.session_id = s.session_id
+    `;
+    if (email) {
+      countQuery += `
+      JOIN aliases a ON sc.distinct_id = a.distinct_id
+      JOIN users u ON a.user_id = u.id
+      `;
+    }
+    countQuery += whereClause;
+
+    const countResult = await db.queryOne(countQuery, params);
+    const total = parseInt(countResult?.total || 0);
+
+    // Add WHERE to base query
+    baseQuery += whereClause;
 
     baseQuery += `
       GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type
       ORDER BY first_timestamp DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
+    params.push(limit, offset);
 
     const { rows: sessions } = await db.query(baseQuery, params);
 
@@ -1740,7 +1814,18 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       };
     });
 
-    res.json({ sessions: transformedSessions });
+    const total_pages = Math.ceil(total / limit);
+    res.json({
+      sessions: transformedSessions,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages,
+        has_next: page < total_pages,
+        has_prev: page > 1
+      }
+    });
   } catch (err) {
     console.error("Error in GET /api/sessions:", err);
     res.status(500).json({ error: "Internal server error" });
