@@ -544,16 +544,15 @@ app.post("/api/campaigns", authenticateJWT, async (req, res) => {
 // List campaigns (auth required)
 app.get("/api/campaigns", authenticateJWT, async (req, res) => {
   try {
+    // Single query with JOIN instead of 3 correlated subqueries per campaign
     const { rows: campaigns } = await db.query(`
       SELECT c.id, c.name, c.created_at, c.is_paused,
-        (SELECT COUNT(DISTINCT sc.session_id) FROM session_chunks sc WHERE sc.campaign_id = c.id) as session_count,
-        (SELECT COUNT(DISTINCT sc2.session_id) FROM session_chunks sc2
-         LEFT JOIN sessions s ON sc2.session_id = s.session_id
-         WHERE sc2.campaign_id = c.id AND s.status = 'completed') as completed_count,
-        (SELECT COUNT(DISTINCT sc3.session_id) FROM session_chunks sc3
-         LEFT JOIN sessions s2 ON sc3.session_id = s2.session_id
-         WHERE sc3.campaign_id = c.id AND (s2.status IS NULL OR s2.status = 'dropped_off')) as dropped_off_count
+        COUNT(DISTINCT s.session_id) as session_count,
+        COUNT(DISTINCT CASE WHEN s.status = 'completed' THEN s.session_id END) as completed_count,
+        COUNT(DISTINCT CASE WHEN s.status IS NULL OR s.status = 'dropped_off' THEN s.session_id END) as dropped_off_count
       FROM campaigns c
+      LEFT JOIN sessions s ON s.campaign_id = c.id
+      GROUP BY c.id, c.name, c.created_at, c.is_paused
       ORDER BY c.created_at DESC
     `);
     res.json({ campaigns });
@@ -597,31 +596,23 @@ app.get("/api/campaigns/validate", async (req, res) => {
 app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
+    // Single query: campaign data + session counts via LEFT JOIN
     const campaign = await db.queryOne(`
-      SELECT id, name, created_at, mission_brief, funnel_config, generated_rubric, ai_report, ai_analysis_status, is_paused
-      FROM campaigns WHERE id = $1
+      SELECT c.id, c.name, c.created_at, c.mission_brief, c.funnel_config,
+             c.generated_rubric, c.ai_report, c.ai_analysis_status, c.is_paused,
+             COUNT(DISTINCT s.session_id) as session_count,
+             COUNT(DISTINCT CASE WHEN s.status = 'completed' THEN s.session_id END) as completed_count,
+             COUNT(DISTINCT CASE WHEN s.status IS NULL OR s.status = 'dropped_off' THEN s.session_id END) as dropped_off_count
+      FROM campaigns c
+      LEFT JOIN sessions s ON s.campaign_id = c.id
+      WHERE c.id = $1
+      GROUP BY c.id, c.name, c.created_at, c.mission_brief, c.funnel_config,
+               c.generated_rubric, c.ai_report, c.ai_analysis_status, c.is_paused
     `, [id]);
 
     if (!campaign) {
       return res.status(404).json({ error: "Campaign not found" });
     }
-
-    const sessionCount = await db.queryOne(
-      'SELECT COUNT(DISTINCT session_id) as count FROM session_chunks WHERE campaign_id = $1',
-      [id]
-    );
-    const completedCount = await db.queryOne(`
-      SELECT COUNT(DISTINCT sc.session_id) as count
-      FROM session_chunks sc
-      LEFT JOIN sessions s ON sc.session_id = s.session_id
-      WHERE sc.campaign_id = $1 AND s.status = 'completed'
-    `, [id]);
-    const droppedOffCount = await db.queryOne(`
-      SELECT COUNT(DISTINCT sc.session_id) as count
-      FROM session_chunks sc
-      LEFT JOIN sessions s ON sc.session_id = s.session_id
-      WHERE sc.campaign_id = $1 AND (s.status IS NULL OR s.status = 'dropped_off')
-    `, [id]);
 
     // Sync funnel_config with campaign_rules (LOG_STEP actions)
     const { rows: logStepRules } = await db.query(`
@@ -660,9 +651,9 @@ app.get("/api/campaigns/:id", authenticateJWT, async (req, res) => {
       ...campaign,
       funnel_config: funnelConfig.length > 0 ? funnelConfig : null,
       generated_rubric: campaign.generated_rubric ? JSON.parse(campaign.generated_rubric) : null,
-      session_count: sessionCount?.count || 0,
-      completed_count: completedCount?.count || 0,
-      dropped_off_count: droppedOffCount?.count || 0,
+      session_count: parseInt(campaign.session_count) || 0,
+      completed_count: parseInt(campaign.completed_count) || 0,
+      dropped_off_count: parseInt(campaign.dropped_off_count) || 0,
       rules: rules || []
     });
   } catch (err) {
