@@ -1045,8 +1045,9 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
       ORDER BY ps.added_at DESC
     `, [problemId]);
 
-    // Batch fetch all session IDs for efficient lookups
+    // Batch fetch all IDs for efficient lookups
     const sessionIds = sessions.map(s => s.session_id);
+    const distinctIds = [...new Set(sessions.map(s => s.distinct_id).filter(Boolean))];
 
     // Batch fetch ALL problems for these sessions (shows other cohorts they belong to)
     const { rows: problemLinks } = sessionIds.length > 0 ? await db.query(`
@@ -1055,6 +1056,14 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
       JOIN campaign_problems cp ON ps.problem_id = cp.id
       WHERE ps.session_id = ANY($1)
     `, [sessionIds]) : { rows: [] };
+
+    // Batch fetch emails for all distinct_ids (avoids N+1)
+    const { rows: emailLinks } = distinctIds.length > 0 ? await db.query(`
+      SELECT a.distinct_id, u.email
+      FROM aliases a
+      JOIN users u ON a.user_id = u.id
+      WHERE a.distinct_id = ANY($1)
+    `, [distinctIds]) : { rows: [] };
 
     // Build session -> problems map
     const problemsMap = {};
@@ -1065,15 +1074,14 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
       problemsMap[link.session_id].push({ id: link.problem_id, title: link.problem_title });
     }
 
-    // Transform sessions to match GET /api/sessions response format
-    const transformedSessions = await Promise.all(sessions.map(async (session) => {
-      // Get email if linked
-      const emailResult = await db.queryOne(`
-        SELECT u.email FROM aliases a
-        JOIN users u ON a.user_id = u.id
-        WHERE a.distinct_id = $1
-      `, [session.distinct_id]);
+    // Build distinct_id -> email map
+    const emailMap = {};
+    for (const link of emailLinks) {
+      emailMap[link.distinct_id] = link.email;
+    }
 
+    // Transform sessions (no more async needed - all data is batched)
+    const transformedSessions = sessions.map((session) => {
       // Resolve furthest_step_index to key string
       let furthest_step_key = null;
       if (session.funnel_config && session.furthest_step_index >= 0) {
@@ -1092,12 +1100,12 @@ app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) =
         ...sessionData,
         status: session.status || "dropped_off",
         watched: session.watched === true,
-        email: emailResult?.email || null,
+        email: emailMap[session.distinct_id] || null,
         playback_url: `/api/sessions/${session.session_id}/playback`,
         furthest_step_key,
         problems: problemsMap[session.session_id] || []
       };
-    }));
+    });
 
     res.json({
       problem: {
@@ -1679,8 +1687,9 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
 
     const { rows: sessions } = await db.query(baseQuery, params);
 
-    // Batch fetch all session IDs for efficient lookups
+    // Batch fetch all IDs for efficient lookups
     const sessionIds = sessions.map(s => s.session_id);
+    const distinctIds = [...new Set(sessions.map(s => s.distinct_id).filter(Boolean))];
 
     // Batch fetch problems for all sessions (avoids N+1)
     const { rows: problemLinks } = sessionIds.length > 0 ? await db.query(`
@@ -1689,6 +1698,14 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       JOIN campaign_problems cp ON ps.problem_id = cp.id
       WHERE ps.session_id = ANY($1)
     `, [sessionIds]) : { rows: [] };
+
+    // Batch fetch emails for all distinct_ids (avoids N+1)
+    const { rows: emailLinks } = distinctIds.length > 0 ? await db.query(`
+      SELECT a.distinct_id, u.email
+      FROM aliases a
+      JOIN users u ON a.user_id = u.id
+      WHERE a.distinct_id = ANY($1)
+    `, [distinctIds]) : { rows: [] };
 
     // Build session -> problems map
     const problemsMap = {};
@@ -1699,15 +1716,14 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       problemsMap[link.session_id].push({ id: link.problem_id, title: link.problem_title });
     }
 
-    // Add playback_url, normalize status, and get email for each session
-    const transformedSessions = await Promise.all(sessions.map(async (session) => {
-      // Get email if linked
-      const emailResult = await db.queryOne(`
-        SELECT u.email FROM aliases a
-        JOIN users u ON a.user_id = u.id
-        WHERE a.distinct_id = $1
-      `, [session.distinct_id]);
+    // Build distinct_id -> email map
+    const emailMap = {};
+    for (const link of emailLinks) {
+      emailMap[link.distinct_id] = link.email;
+    }
 
+    // Transform sessions (no more async needed - all data is batched)
+    const transformedSessions = sessions.map((session) => {
       // Resolve furthest_step_index to key string
       let furthest_step_key = null;
       if (session.funnel_config && session.furthest_step_index >= 0) {
@@ -1726,12 +1742,12 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         ...sessionData,
         status: session.status || "dropped_off",
         watched: session.watched === true,
-        email: emailResult?.email || null,
+        email: emailMap[session.distinct_id] || null,
         playback_url: `/api/sessions/${session.session_id}/playback`,
         furthest_step_key,
         problems: problemsMap[session.session_id] || []
       };
-    }));
+    });
 
     res.json({ sessions: transformedSessions });
   } catch (err) {
