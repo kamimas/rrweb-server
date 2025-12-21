@@ -19,6 +19,7 @@ const aiAnalyst = require("./src/ai-analyst");
 const s3Helpers = require("./src/s3-helpers");
 const { generateTimeline } = require("./timeline-react-aware");
 const { getLocationFromRequest } = require("./src/utils/geo");
+const UAParser = require("ua-parser-js");
 
 // ----- Session Playback Cache -----
 // TTL: 10 minutes, check for expired keys every 2 minutes
@@ -987,26 +988,35 @@ app.post("/api/sessions/:sessionId/confirm-chunk", async (req, res) => {
       ON CONFLICT (session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at
     `, [sessionId, Date.now()]);
 
-    // Capture location data from client IP - ONLY on first chunk
-    // The WHERE clause makes chunks 2-N effectively free (no GeoIP lookup, no DB write)
-    const existingLocation = await db.queryOne(
-      `SELECT location_country FROM sessions WHERE session_id = $1`,
+    // Capture location + device data - ONLY on first chunk
+    // Optimization: check if already set, skip parsing on chunks 2-N
+    const existingData = await db.queryOne(
+      `SELECT location_country, device_os FROM sessions WHERE session_id = $1`,
       [sessionId]
     );
 
-    let locLog = 'already set';
-    if (!existingLocation?.location_country) {
-      // First chunk for this session - do the GeoIP lookup
+    let metaLog = 'already set';
+    if (!existingData?.location_country || !existingData?.device_os) {
+      // First chunk - do GeoIP lookup + UA parsing
       const loc = getLocationFromRequest(req);
+
+      // Parse User-Agent
+      const uaString = req.headers['user-agent'] || '';
+      const ua = new UAParser(uaString).getResult();
+      const deviceOs = ua.os.name || 'Unknown';
+      const deviceBrowser = ua.browser.name || 'Unknown';
+      const deviceType = ua.device.type || 'desktop';
+
       await db.query(`
         UPDATE sessions
-        SET location_country = $1, location_city = $2, location_region = $3, ip_address = $4
-        WHERE session_id = $5 AND location_country IS NULL
-      `, [loc.country, loc.city, loc.region, loc.ip, sessionId]);
-      locLog = `${loc.country}/${loc.city}`;
+        SET location_country = $1, location_city = $2, location_region = $3, ip_address = $4,
+            device_os = $5, device_browser = $6, device_type = $7
+        WHERE session_id = $8 AND (location_country IS NULL OR device_os IS NULL)
+      `, [loc.country, loc.city, loc.region, loc.ip, deviceOs, deviceBrowser, deviceType, sessionId]);
+      metaLog = `${loc.country}/${loc.city}, ${deviceOs}/${deviceType}`;
     }
 
-    console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId}, loc: ${locLog})`);
+    console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId}, ${metaLog})`);
 
     res.json({ success: true });
   } catch (err) {
@@ -1200,6 +1210,9 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         s.location_country,
         s.location_city,
         s.location_region,
+        s.device_os,
+        s.device_browser,
+        s.device_type,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
         (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
@@ -1279,7 +1292,7 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     }
 
     baseQuery += `
-      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type
       ORDER BY first_timestamp DESC
     `;
 

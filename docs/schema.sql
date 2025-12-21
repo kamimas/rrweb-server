@@ -84,7 +84,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     location_country VARCHAR(2),                  -- ISO 2-letter code (US, CA, FR)
     location_city VARCHAR(100),                   -- City name (Toronto, San Francisco)
     location_region VARCHAR(100),                 -- State/Province code (ON, CA)
-    ip_address VARCHAR(45)                        -- IPv6/IPv4 (optional, for audit)
+    ip_address VARCHAR(45),                       -- IPv6/IPv4 (optional, for audit)
+
+    -- Device Data (User-Agent parsing)
+    device_os VARCHAR(50),                        -- e.g. "Windows", "iOS", "Android"
+    device_browser VARCHAR(50),                   -- e.g. "Chrome", "Safari"
+    device_type VARCHAR(20)                       -- e.g. "mobile", "tablet", "desktop"
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
