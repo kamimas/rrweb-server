@@ -1175,7 +1175,7 @@ app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
 // List sessions (auth required)
 app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
-    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city } = req.query;
+    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type } = req.query;
 
     if (!campaign_id && !campaign && !email) {
       return res.status(400).json({ error: "Missing filter: campaign_id, campaign, or email required" });
@@ -1285,6 +1285,20 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     if (city) {
       whereClauses.push(`LOWER(s.location_city) = LOWER($${paramIndex++})`);
       params.push(city);
+    }
+
+    // Device filters
+    if (os) {
+      whereClauses.push(`LOWER(s.device_os) = LOWER($${paramIndex++})`);
+      params.push(os);
+    }
+    if (browser) {
+      whereClauses.push(`LOWER(s.device_browser) = LOWER($${paramIndex++})`);
+      params.push(browser);
+    }
+    if (device_type) {
+      whereClauses.push(`LOWER(s.device_type) = LOWER($${paramIndex++})`);
+      params.push(device_type);
     }
 
     if (whereClauses.length > 0) {
