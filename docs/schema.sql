@@ -59,6 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_aliases_user_id ON aliases(user_id);
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS sessions (
     session_id VARCHAR(255) PRIMARY KEY,         -- Client-generated session ID
+    campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,  -- Parent campaign
 
     -- Status Tracking
     status VARCHAR(50),                           -- NULL, completed, dropped_off
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_assets_status ON sessions(assets_status);
 CREATE INDEX IF NOT EXISTS idx_sessions_location_country ON sessions(location_country);
+CREATE INDEX IF NOT EXISTS idx_sessions_campaign_id ON sessions(campaign_id);
 
 -- =============================================================================
 -- SESSION CHUNKS TABLE
@@ -157,6 +159,33 @@ CREATE TABLE IF NOT EXISTS session_steps (
 CREATE INDEX IF NOT EXISTS idx_session_steps_session_id ON session_steps(session_id);
 
 -- =============================================================================
+-- CAMPAIGN PROBLEMS TABLE (Problem Cohorts)
+-- Manual cohorts for curating sessions as evidence for specific problems
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS campaign_problems (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_problems_campaign_id ON campaign_problems(campaign_id);
+
+-- =============================================================================
+-- PROBLEM SESSIONS TABLE (Junction)
+-- Links sessions to problem cohorts (many-to-many)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS problem_sessions (
+    problem_id UUID REFERENCES campaign_problems(id) ON DELETE CASCADE,
+    session_id VARCHAR(255) REFERENCES sessions(session_id) ON DELETE CASCADE,
+    added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (problem_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_problem_sessions_session_id ON problem_sessions(session_id);
+
+-- =============================================================================
 -- HELPER VIEWS (Optional, for convenience)
 -- =============================================================================
 
@@ -164,6 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_session_steps_session_id ON session_steps(session
 CREATE OR REPLACE VIEW sessions_with_users AS
 SELECT
     s.session_id,
+    s.campaign_id,
     s.status,
     s.watched,
     s.assets_status,
@@ -173,17 +203,16 @@ SELECT
     s.location_city,
     s.location_region,
     u.email as user_email,
-    sc.campaign_id,
     c.name as campaign_name,
     MIN(sc.timestamp) as start_time,
     MAX(sc.timestamp) as end_time,
     COUNT(sc.id) as chunk_count
 FROM sessions s
+LEFT JOIN campaigns c ON s.campaign_id = c.id
 LEFT JOIN session_chunks sc ON s.session_id = sc.session_id
 LEFT JOIN aliases a ON sc.distinct_id = a.distinct_id
 LEFT JOIN users u ON a.user_id = u.id
-LEFT JOIN campaigns c ON sc.campaign_id = c.id
-GROUP BY s.session_id, u.email, sc.campaign_id, c.name;
+GROUP BY s.session_id, s.campaign_id, u.email, c.name;
 
 -- =============================================================================
 -- NOTES ON MIGRATION FROM SQLITE

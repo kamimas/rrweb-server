@@ -871,6 +871,294 @@ app.delete("/api/campaigns/:id", authenticateJWT, async (req, res) => {
 });
 
 // =====================================================
+// PROBLEM COHORTS ENDPOINTS
+// =====================================================
+
+// Create a new problem cohort for a campaign
+app.post("/api/campaigns/:id/problems", authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description } = req.body;
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: "Title is required" });
+    }
+
+    // Verify campaign exists
+    const campaign = await db.queryOne("SELECT id FROM campaigns WHERE id = $1", [id]);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const result = await db.queryOne(`
+      INSERT INTO campaign_problems (campaign_id, title, description)
+      VALUES ($1, $2, $3)
+      RETURNING id, campaign_id, title, description, created_at
+    `, [id, title.trim(), description || null]);
+
+    console.log(`📋 Problem created: "${result.title}" for campaign ${id}`);
+    res.status(201).json(result);
+  } catch (err) {
+    console.error("Error in POST /api/campaigns/:id/problems:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// List all problem cohorts for a campaign
+app.get("/api/campaigns/:id/problems", authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Verify campaign exists
+    const campaign = await db.queryOne("SELECT id, name FROM campaigns WHERE id = $1", [id]);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const { rows: problems } = await db.query(`
+      SELECT
+        cp.id,
+        cp.campaign_id,
+        cp.title,
+        cp.description,
+        cp.created_at,
+        COUNT(ps.session_id) as session_count
+      FROM campaign_problems cp
+      LEFT JOIN problem_sessions ps ON cp.id = ps.problem_id
+      WHERE cp.campaign_id = $1
+      GROUP BY cp.id
+      ORDER BY cp.created_at DESC
+    `, [id]);
+
+    res.json({ campaign_name: campaign.name, problems });
+  } catch (err) {
+    console.error("Error in GET /api/campaigns/:id/problems:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Add a session to a problem cohort
+app.post("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      return res.status(400).json({ error: "sessionId is required" });
+    }
+
+    // Get problem and its campaign_id
+    const problem = await db.queryOne(
+      "SELECT id, campaign_id, title FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // Get session and verify it has a campaign_id
+    const session = await db.queryOne(
+      "SELECT session_id, campaign_id FROM sessions WHERE session_id = $1",
+      [sessionId]
+    );
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    // Reject orphan sessions (no campaign association)
+    if (!session.campaign_id) {
+      return res.status(400).json({
+        error: "Session has no campaign association and cannot be added to a problem cohort"
+      });
+    }
+
+    // Validate session belongs to same campaign as problem
+    if (session.campaign_id !== problem.campaign_id) {
+      return res.status(400).json({
+        error: "Session belongs to a different campaign than this problem cohort"
+      });
+    }
+
+    // Insert with ON CONFLICT DO NOTHING for idempotency
+    await db.query(`
+      INSERT INTO problem_sessions (problem_id, session_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+    `, [problemId, sessionId]);
+
+    console.log(`📎 Session ${sessionId} added to problem "${problem.title}"`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error in POST /api/problems/:problemId/sessions:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get all sessions in a problem cohort (full session details)
+app.get("/api/problems/:problemId/sessions", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+
+    // Verify problem exists
+    const problem = await db.queryOne(
+      "SELECT id, campaign_id, title FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // Reuse the same query structure as GET /api/sessions for consistent response format
+    const { rows: sessions } = await db.query(`
+      SELECT
+        sc.session_id,
+        sc.distinct_id,
+        sc.campaign_id,
+        c.name as campaign_name,
+        c.funnel_config,
+        s.status,
+        s.watched,
+        s.watched_at,
+        s.assets_status,
+        s.ai_diagnosis,
+        s.furthest_step_index,
+        s.location_country,
+        s.location_city,
+        s.location_region,
+        s.device_os,
+        s.device_browser,
+        s.device_type,
+        ps.added_at as added_to_problem_at,
+        MIN(sc.timestamp) as first_timestamp,
+        MAX(sc.timestamp) as last_timestamp,
+        (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
+        COUNT(sc.id) as chunk_count
+      FROM problem_sessions ps
+      JOIN sessions s ON ps.session_id = s.session_id
+      JOIN session_chunks sc ON s.session_id = sc.session_id
+      LEFT JOIN campaigns c ON s.campaign_id = c.id
+      WHERE ps.problem_id = $1
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config,
+               s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis,
+               s.furthest_step_index, s.location_country, s.location_city, s.location_region,
+               s.device_os, s.device_browser, s.device_type, ps.added_at
+      ORDER BY ps.added_at DESC
+    `, [problemId]);
+
+    // Transform sessions to match GET /api/sessions response format
+    const transformedSessions = await Promise.all(sessions.map(async (session) => {
+      // Get email if linked
+      const emailResult = await db.queryOne(`
+        SELECT u.email FROM aliases a
+        JOIN users u ON a.user_id = u.id
+        WHERE a.distinct_id = $1
+      `, [session.distinct_id]);
+
+      // Resolve furthest_step_index to key string
+      let furthest_step_key = null;
+      if (session.funnel_config && session.furthest_step_index >= 0) {
+        try {
+          const funnelSteps = JSON.parse(session.funnel_config);
+          furthest_step_key = funnelSteps[session.furthest_step_index]?.key || null;
+        } catch (e) {
+          // Invalid JSON, leave as null
+        }
+      }
+
+      // Exclude funnel_config from response (internal detail)
+      const { funnel_config, ...sessionData } = session;
+
+      return {
+        ...sessionData,
+        status: session.status || "dropped_off",
+        watched: session.watched === true,
+        email: emailResult?.email || null,
+        playback_url: `/api/sessions/${session.session_id}/playback`,
+        furthest_step_key
+      };
+    }));
+
+    res.json({
+      problem: {
+        id: problem.id,
+        title: problem.title,
+        campaign_id: problem.campaign_id
+      },
+      sessions: transformedSessions
+    });
+  } catch (err) {
+    console.error("Error in GET /api/problems/:problemId/sessions:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Delete a problem cohort
+app.delete("/api/problems/:problemId", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+
+    const problem = await db.queryOne(
+      "SELECT id, title, campaign_id FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // Get session count before deletion
+    const countResult = await db.queryOne(
+      "SELECT COUNT(*) as count FROM problem_sessions WHERE problem_id = $1",
+      [problemId]
+    );
+
+    // CASCADE will handle problem_sessions cleanup
+    await db.query("DELETE FROM campaign_problems WHERE id = $1", [problemId]);
+
+    console.log(`🗑️  Problem deleted: "${problem.title}" (${countResult?.count || 0} sessions unlinked)`);
+    res.json({
+      success: true,
+      deleted_problem: problem.title,
+      unlinked_sessions: parseInt(countResult?.count || 0)
+    });
+  } catch (err) {
+    console.error("Error in DELETE /api/problems/:problemId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Remove a session from a problem cohort
+app.delete("/api/problems/:problemId/sessions/:sessionId", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId, sessionId } = req.params;
+
+    // Verify problem exists
+    const problem = await db.queryOne(
+      "SELECT id, title FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    const result = await db.query(
+      "DELETE FROM problem_sessions WHERE problem_id = $1 AND session_id = $2",
+      [problemId, sessionId]
+    );
+
+    // Check if anything was actually deleted
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Session not found in this problem cohort" });
+    }
+
+    console.log(`📎 Session ${sessionId} removed from problem "${problem.title}"`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error in DELETE /api/problems/:problemId/sessions/:sessionId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =====================================================
 // SESSION ENDPOINTS
 // =====================================================
 
@@ -981,12 +1269,14 @@ app.post("/api/sessions/:sessionId/confirm-chunk", async (req, res) => {
       ON CONFLICT DO NOTHING
     `, [sessionId, distinctId, campaignId, s3Key, s3Bucket, pageUrl || null, chunkTimestamp, seqId]);
 
-    // Ensure session row exists (for location update below)
+    // Ensure session row exists with campaign_id (for location update below)
     await db.query(`
-      INSERT INTO sessions (session_id, updated_at)
-      VALUES ($1, $2)
-      ON CONFLICT (session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at
-    `, [sessionId, Date.now()]);
+      INSERT INTO sessions (session_id, campaign_id, updated_at)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (session_id) DO UPDATE SET
+        campaign_id = COALESCE(sessions.campaign_id, EXCLUDED.campaign_id),
+        updated_at = EXCLUDED.updated_at
+    `, [sessionId, campaignId, Date.now()]);
 
     // Capture location + device data - ONLY on first chunk
     // Optimization: check if already set, skip parsing on chunks 2-N
@@ -1112,6 +1402,15 @@ app.post("/api/sessions/:sessionId/flush", async (req, res) => {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT DO NOTHING
       `, [sessionId, distinctId, campaignRecord.id, s3Key, bucketName, pageUrl || null, chunkTimestamp, seqId]);
+
+      // Ensure session row exists with campaign_id
+      await db.query(`
+        INSERT INTO sessions (session_id, campaign_id, updated_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (session_id) DO UPDATE SET
+          campaign_id = COALESCE(sessions.campaign_id, EXCLUDED.campaign_id),
+          updated_at = EXCLUDED.updated_at
+      `, [sessionId, campaignRecord.id, Date.now()]);
 
       console.log(`🚪 Final flush uploaded: ${sessionId} (${events.length} events)`);
       res.status(200).json({ accepted: true, persisted: true });
