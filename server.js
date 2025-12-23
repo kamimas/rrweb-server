@@ -1417,6 +1417,24 @@ app.post("/api/sessions/:sessionId/confirm-chunk", async (req, res) => {
       metaLog = `${loc.country}/${loc.city}, ${deviceOs}/${deviceType}`;
     }
 
+    // Recalculate duration_ms and start_hour from all chunks
+    await db.query(`
+      UPDATE sessions s
+      SET
+        duration_ms = sub.dur,
+        start_hour = COALESCE(s.start_hour, sub.st_hour)
+      FROM (
+        SELECT
+          session_id,
+          (MAX(timestamp) - MIN(timestamp))::INTEGER as dur,
+          EXTRACT(HOUR FROM TO_TIMESTAMP(MIN(timestamp) / 1000.0))::SMALLINT as st_hour
+        FROM session_chunks
+        WHERE session_id = $1
+        GROUP BY session_id
+      ) sub
+      WHERE s.session_id = sub.session_id
+    `, [sessionId]);
+
     console.log(`✅ Chunk confirmed: ${sessionId} -> s3://${s3Bucket}/${s3Key} (seq: ${seqId}, ${metaLog})`);
 
     res.json({ success: true });
@@ -1523,6 +1541,24 @@ app.post("/api/sessions/:sessionId/flush", async (req, res) => {
           updated_at = EXCLUDED.updated_at
       `, [sessionId, campaignRecord.id, Date.now()]);
 
+      // Final recalculation of duration_ms and start_hour
+      await db.query(`
+        UPDATE sessions s
+        SET
+          duration_ms = sub.dur,
+          start_hour = COALESCE(s.start_hour, sub.st_hour)
+        FROM (
+          SELECT
+            session_id,
+            (MAX(timestamp) - MIN(timestamp))::INTEGER as dur,
+            EXTRACT(HOUR FROM TO_TIMESTAMP(MIN(timestamp) / 1000.0))::SMALLINT as st_hour
+          FROM session_chunks
+          WHERE session_id = $1
+          GROUP BY session_id
+        ) sub
+        WHERE s.session_id = sub.session_id
+      `, [sessionId]);
+
       console.log(`🚪 Final flush uploaded: ${sessionId} (${events.length} events)`);
       res.status(200).json({ accepted: true, persisted: true });
     } catch (flushErr) {
@@ -1585,7 +1621,7 @@ app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
 // List sessions (auth required)
 app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
-    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type } = req.query;
+    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type, min_duration, max_duration, hour_start, hour_end } = req.query;
 
     // Pagination params
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -1628,9 +1664,10 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         s.device_os,
         s.device_browser,
         s.device_type,
+        s.duration_ms,
+        s.start_hour,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
-        (MAX(sc.timestamp) - MIN(sc.timestamp)) as duration_ms,
         COUNT(sc.id) as chunk_count
       FROM session_chunks sc
       LEFT JOIN campaigns c ON sc.campaign_id = c.id
@@ -1716,6 +1753,38 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       params.push(device_type);
     }
 
+    // Duration filters (uses indexed s.duration_ms column)
+    if (min_duration) {
+      const minMs = parseInt(min_duration);
+      if (!isNaN(minMs)) {
+        whereClauses.push(`s.duration_ms >= $${paramIndex++}`);
+        params.push(minMs);
+      }
+    }
+    if (max_duration) {
+      const maxMs = parseInt(max_duration);
+      if (!isNaN(maxMs)) {
+        whereClauses.push(`s.duration_ms <= $${paramIndex++}`);
+        params.push(maxMs);
+      }
+    }
+
+    // Time-of-day filters (uses indexed s.start_hour column, 0-23)
+    if (hour_start !== undefined && hour_start !== '') {
+      const hStart = parseInt(hour_start);
+      if (!isNaN(hStart) && hStart >= 0 && hStart <= 23) {
+        whereClauses.push(`s.start_hour >= $${paramIndex++}`);
+        params.push(hStart);
+      }
+    }
+    if (hour_end !== undefined && hour_end !== '') {
+      const hEnd = parseInt(hour_end);
+      if (!isNaN(hEnd) && hEnd >= 0 && hEnd <= 23) {
+        whereClauses.push(`s.start_hour <= $${paramIndex++}`);
+        params.push(hEnd);
+      }
+    }
+
     // Build WHERE clause string
     let whereClause = "";
     if (whereClauses.length > 0) {
@@ -1744,7 +1813,7 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     baseQuery += whereClause;
 
     baseQuery += `
-      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type, s.duration_ms, s.start_hour
       ORDER BY first_timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
