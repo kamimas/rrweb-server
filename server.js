@@ -1621,7 +1621,7 @@ app.get("/api/sessions/search", authenticateJWT, async (req, res) => {
 // List sessions (auth required)
 app.get("/api/sessions", authenticateJWT, async (req, res) => {
   try {
-    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type, min_duration, max_duration, hour_start, hour_end } = req.query;
+    const { campaign_id, campaign, email, status, reached_step, not_reached_step, country, city, os, browser, device_type, min_duration, max_duration, hour_start, hour_end, date_from, date_to } = req.query;
 
     // Pagination params
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -1666,6 +1666,7 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
         s.device_type,
         s.duration_ms,
         s.start_hour,
+        s.updated_at,
         MIN(sc.timestamp) as first_timestamp,
         MAX(sc.timestamp) as last_timestamp,
         COUNT(sc.id) as chunk_count
@@ -1785,6 +1786,24 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
       }
     }
 
+    // Date range filters (uses indexed s.updated_at column, Unix ms)
+    // Accepts ISO date strings (2025-12-03) or Unix ms timestamps
+    if (date_from) {
+      const fromMs = date_from.includes('-') ? new Date(date_from).getTime() : parseInt(date_from);
+      if (!isNaN(fromMs)) {
+        whereClauses.push(`s.updated_at >= $${paramIndex++}`);
+        params.push(fromMs);
+      }
+    }
+    if (date_to) {
+      // If ISO date, set to end of day (23:59:59.999)
+      let toMs = date_to.includes('-') ? new Date(date_to).getTime() + 86400000 - 1 : parseInt(date_to);
+      if (!isNaN(toMs)) {
+        whereClauses.push(`s.updated_at <= $${paramIndex++}`);
+        params.push(toMs);
+      }
+    }
+
     // Build WHERE clause string
     let whereClause = "";
     if (whereClauses.length > 0) {
@@ -1813,7 +1832,7 @@ app.get("/api/sessions", authenticateJWT, async (req, res) => {
     baseQuery += whereClause;
 
     baseQuery += `
-      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type, s.duration_ms, s.start_hour
+      GROUP BY sc.session_id, sc.distinct_id, sc.campaign_id, c.name, c.funnel_config, s.status, s.watched, s.watched_at, s.assets_status, s.ai_diagnosis, s.furthest_step_index, s.location_country, s.location_city, s.location_region, s.device_os, s.device_browser, s.device_type, s.duration_ms, s.start_hour, s.updated_at
       ORDER BY first_timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
