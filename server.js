@@ -1270,6 +1270,293 @@ app.delete("/api/problems/:problemId/sessions/:sessionId", authenticateJWT, asyn
 });
 
 // =====================================================
+// NOTES ENDPOINTS
+// =====================================================
+
+const VALID_NOTE_COLORS = ['yellow', 'blue', 'green', 'pink'];
+
+// Helper to derive note type from FK values
+function getNoteType(problemId, sessionId) {
+  if (problemId && sessionId) return 'evidence';
+  if (problemId) return 'master_note';
+  if (sessionId) return 'observation';
+  return 'general';
+}
+
+// Create a note
+app.post("/api/notes", authenticateJWT, async (req, res) => {
+  try {
+    const { campaign_id, problem_id, session_id, content, color } = req.body;
+
+    // Validate required fields
+    if (!campaign_id) {
+      return res.status(400).json({ error: "campaign_id is required" });
+    }
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: "content is required" });
+    }
+
+    // Validate color if provided
+    const noteColor = color || 'yellow';
+    if (!VALID_NOTE_COLORS.includes(noteColor)) {
+      return res.status(400).json({ error: `Invalid color. Must be one of: ${VALID_NOTE_COLORS.join(', ')}` });
+    }
+
+    // Verify campaign exists
+    const campaign = await db.queryOne("SELECT id FROM campaigns WHERE id = $1", [campaign_id]);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    // If problem_id provided, verify it exists and belongs to the campaign
+    if (problem_id) {
+      const problem = await db.queryOne(
+        "SELECT id, campaign_id FROM campaign_problems WHERE id = $1",
+        [problem_id]
+      );
+      if (!problem) {
+        return res.status(404).json({ error: "Problem not found" });
+      }
+      if (problem.campaign_id !== campaign_id) {
+        return res.status(400).json({ error: "Problem does not belong to the specified campaign" });
+      }
+    }
+
+    // If session_id provided, verify it exists and belongs to the campaign
+    if (session_id) {
+      const session = await db.queryOne(
+        "SELECT session_id, campaign_id FROM sessions WHERE session_id = $1",
+        [session_id]
+      );
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      if (session.campaign_id !== campaign_id) {
+        return res.status(400).json({ error: "Session does not belong to the specified campaign" });
+      }
+    }
+
+    const result = await db.queryOne(`
+      INSERT INTO problem_notes (campaign_id, problem_id, session_id, content, color)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, campaign_id, problem_id, session_id, content, color, created_at
+    `, [campaign_id, problem_id || null, session_id || null, content.trim(), noteColor]);
+
+    console.log(`📝 Note created: ${result.id} (${getNoteType(problem_id, session_id)})`);
+    res.status(201).json({
+      ...result,
+      note_type: getNoteType(result.problem_id, result.session_id)
+    });
+  } catch (err) {
+    console.error("Error in POST /api/notes:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// List notes with filters
+app.get("/api/notes", authenticateJWT, async (req, res) => {
+  try {
+    const { campaign_id, problem_id, session_id } = req.query;
+
+    // Pagination
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const offset = (page - 1) * limit;
+
+    // Require campaign_id
+    if (!campaign_id) {
+      return res.status(400).json({ error: "campaign_id is required" });
+    }
+
+    // Build dynamic WHERE clause
+    let params = [];
+    let paramIndex = 1;
+    let whereClauses = [];
+
+    whereClauses.push(`n.campaign_id = $${paramIndex++}`);
+    params.push(campaign_id);
+
+    if (problem_id) {
+      whereClauses.push(`n.problem_id = $${paramIndex++}`);
+      params.push(problem_id);
+    }
+
+    if (session_id) {
+      whereClauses.push(`n.session_id = $${paramIndex++}`);
+      params.push(session_id);
+    }
+
+    const whereClause = whereClauses.join(" AND ");
+
+    // Count query
+    const countResult = await db.queryOne(
+      `SELECT COUNT(*) as total FROM problem_notes n WHERE ${whereClause}`,
+      params
+    );
+    const total = parseInt(countResult?.total || 0);
+
+    // Main query with JOINs for related names
+    const { rows: notes } = await db.query(`
+      SELECT
+        n.id,
+        n.campaign_id,
+        n.problem_id,
+        n.session_id,
+        n.content,
+        n.color,
+        n.created_at,
+        c.name as campaign_name,
+        cp.title as problem_title,
+        s.distinct_id as session_distinct_id
+      FROM problem_notes n
+      LEFT JOIN campaigns c ON n.campaign_id = c.id
+      LEFT JOIN campaign_problems cp ON n.problem_id = cp.id
+      LEFT JOIN sessions s ON n.session_id = s.session_id
+      WHERE ${whereClause}
+      ORDER BY n.created_at DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `, [...params, limit, offset]);
+
+    const total_pages = Math.ceil(total / limit);
+
+    res.json({
+      notes: notes.map(n => ({
+        ...n,
+        note_type: getNoteType(n.problem_id, n.session_id)
+      })),
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages,
+        has_next: page < total_pages,
+        has_prev: page > 1
+      }
+    });
+  } catch (err) {
+    console.error("Error in GET /api/notes:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get single note
+app.get("/api/notes/:noteId", authenticateJWT, async (req, res) => {
+  try {
+    const { noteId } = req.params;
+
+    const note = await db.queryOne(`
+      SELECT
+        n.id,
+        n.campaign_id,
+        n.problem_id,
+        n.session_id,
+        n.content,
+        n.color,
+        n.created_at,
+        c.name as campaign_name,
+        cp.title as problem_title,
+        s.distinct_id as session_distinct_id
+      FROM problem_notes n
+      LEFT JOIN campaigns c ON n.campaign_id = c.id
+      LEFT JOIN campaign_problems cp ON n.problem_id = cp.id
+      LEFT JOIN sessions s ON n.session_id = s.session_id
+      WHERE n.id = $1
+    `, [noteId]);
+
+    if (!note) {
+      return res.status(404).json({ error: "Note not found" });
+    }
+
+    res.json({
+      ...note,
+      note_type: getNoteType(note.problem_id, note.session_id)
+    });
+  } catch (err) {
+    console.error("Error in GET /api/notes/:noteId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Update a note
+app.patch("/api/notes/:noteId", authenticateJWT, async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { content, color } = req.body;
+
+    // Fetch existing note
+    const note = await db.queryOne(
+      "SELECT id, campaign_id, problem_id, session_id, content, color, created_at FROM problem_notes WHERE id = $1",
+      [noteId]
+    );
+    if (!note) {
+      return res.status(404).json({ error: "Note not found" });
+    }
+
+    // Require at least one field
+    if (content === undefined && color === undefined) {
+      return res.status(400).json({ error: "At least one of content or color must be provided" });
+    }
+
+    // Validate content if provided
+    if (content !== undefined && (!content || !content.trim())) {
+      return res.status(400).json({ error: "Content cannot be empty" });
+    }
+
+    // Validate color if provided
+    if (color !== undefined && !VALID_NOTE_COLORS.includes(color)) {
+      return res.status(400).json({ error: `Invalid color. Must be one of: ${VALID_NOTE_COLORS.join(', ')}` });
+    }
+
+    const newContent = content !== undefined ? content.trim() : note.content;
+    const newColor = color !== undefined ? color : note.color;
+
+    await db.query(
+      "UPDATE problem_notes SET content = $1, color = $2 WHERE id = $3",
+      [newContent, newColor, noteId]
+    );
+
+    console.log(`📝 Note updated: ${noteId}`);
+    res.json({
+      id: note.id,
+      campaign_id: note.campaign_id,
+      problem_id: note.problem_id,
+      session_id: note.session_id,
+      content: newContent,
+      color: newColor,
+      created_at: note.created_at,
+      note_type: getNoteType(note.problem_id, note.session_id)
+    });
+  } catch (err) {
+    console.error("Error in PATCH /api/notes/:noteId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Delete a note
+app.delete("/api/notes/:noteId", authenticateJWT, async (req, res) => {
+  try {
+    const { noteId } = req.params;
+
+    // Fetch note to confirm it exists
+    const note = await db.queryOne(
+      "SELECT id, content FROM problem_notes WHERE id = $1",
+      [noteId]
+    );
+    if (!note) {
+      return res.status(404).json({ error: "Note not found" });
+    }
+
+    await db.query("DELETE FROM problem_notes WHERE id = $1", [noteId]);
+
+    console.log(`🗑️ Note deleted: ${noteId}`);
+    res.json({ success: true, deleted_note_id: noteId });
+  } catch (err) {
+    console.error("Error in DELETE /api/notes/:noteId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =====================================================
 // SESSION ENDPOINTS
 // =====================================================
 

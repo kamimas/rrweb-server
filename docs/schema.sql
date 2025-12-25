@@ -186,6 +186,29 @@ CREATE TABLE IF NOT EXISTS problem_sessions (
 CREATE INDEX IF NOT EXISTS idx_problem_sessions_session_id ON problem_sessions(session_id);
 
 -- =============================================================================
+-- PROBLEM NOTES TABLE (Contextual Notes)
+-- Flexible notes scoped to: problem only, session only, or both
+-- Note types:
+--   - problem_id only   → "Master Note" for that Problem
+--   - session_id only   → "General Observation" for that Session
+--   - both set          → "Evidence" linking session to problem
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS problem_notes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    problem_id UUID REFERENCES campaign_problems(id) ON DELETE CASCADE,
+    session_id VARCHAR(255) REFERENCES sessions(session_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    color VARCHAR(20) DEFAULT 'yellow',  -- 'yellow', 'blue', 'green', 'pink'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_lookup ON problem_notes(campaign_id, problem_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_notes_campaign ON problem_notes(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_notes_problem ON problem_notes(problem_id);
+CREATE INDEX IF NOT EXISTS idx_notes_session ON problem_notes(session_id);
+
+-- =============================================================================
 -- HELPER VIEWS (Optional, for convenience)
 -- =============================================================================
 
