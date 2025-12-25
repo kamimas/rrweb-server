@@ -1406,12 +1406,10 @@ app.get("/api/notes", authenticateJWT, async (req, res) => {
         n.color,
         n.created_at,
         c.name as campaign_name,
-        cp.title as problem_title,
-        s.distinct_id as session_distinct_id
+        cp.title as problem_title
       FROM problem_notes n
       LEFT JOIN campaigns c ON n.campaign_id = c.id
       LEFT JOIN campaign_problems cp ON n.problem_id = cp.id
-      LEFT JOIN sessions s ON n.session_id = s.session_id
       WHERE ${whereClause}
       ORDER BY n.created_at DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
@@ -1454,12 +1452,10 @@ app.get("/api/notes/:noteId", authenticateJWT, async (req, res) => {
         n.color,
         n.created_at,
         c.name as campaign_name,
-        cp.title as problem_title,
-        s.distinct_id as session_distinct_id
+        cp.title as problem_title
       FROM problem_notes n
       LEFT JOIN campaigns c ON n.campaign_id = c.id
       LEFT JOIN campaign_problems cp ON n.problem_id = cp.id
-      LEFT JOIN sessions s ON n.session_id = s.session_id
       WHERE n.id = $1
     `, [noteId]);
 
