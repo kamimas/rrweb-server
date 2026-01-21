@@ -19,5 +19,6 @@ jobs:
             cd ~/rrweb-server
             git fetch origin main
             git reset --hard origin/main
-            docker compose down
+            docker compose down --remove-orphans || true
+            docker container prune -f
             docker compose up -d --build
