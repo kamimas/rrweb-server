@@ -1270,6 +1270,256 @@ app.delete("/api/problems/:problemId/sessions/:sessionId", authenticateJWT, asyn
 });
 
 // =====================================================
+// PROBLEM ANALYSIS ENDPOINTS
+// =====================================================
+
+// Helper: Get sessions with notes for a problem
+async function getSessionsWithNotesForProblem(problemId) {
+  // Get sessions in this problem that have at least one note
+  const { rows: sessions } = await db.query(`
+    SELECT DISTINCT
+      s.session_id,
+      s.location_country,
+      s.location_city,
+      s.location_region,
+      s.device_os,
+      s.device_browser,
+      s.device_type,
+      s.duration_ms,
+      s.start_hour
+    FROM problem_sessions ps
+    JOIN sessions s ON ps.session_id = s.session_id
+    WHERE ps.problem_id = $1
+      AND EXISTS (
+        SELECT 1 FROM problem_notes pn
+        WHERE pn.session_id = s.session_id
+      )
+  `, [problemId]);
+
+  if (sessions.length === 0) {
+    return [];
+  }
+
+  // Get all notes for these sessions
+  const sessionIds = sessions.map(s => s.session_id);
+  const { rows: notes } = await db.query(`
+    SELECT session_id, content, color
+    FROM problem_notes
+    WHERE session_id = ANY($1)
+    ORDER BY created_at ASC
+  `, [sessionIds]);
+
+  // Build a map of session_id -> notes
+  const notesMap = {};
+  for (const note of notes) {
+    if (!notesMap[note.session_id]) {
+      notesMap[note.session_id] = [];
+    }
+    notesMap[note.session_id].push({ content: note.content, color: note.color });
+  }
+
+  // Attach notes to sessions
+  return sessions.map(session => ({
+    ...session,
+    notes: notesMap[session.session_id] || []
+  }));
+}
+
+// Analyze a problem cohort
+app.post("/api/problems/:problemId/analyze", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+
+    // Check for Gemini API key
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(503).json({ error: "AI analysis not configured (GEMINI_API_KEY missing)" });
+    }
+
+    // Fetch problem
+    const problem = await db.queryOne(
+      "SELECT id, campaign_id, title, description FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // Get sessions with notes
+    const sessionsWithNotes = await getSessionsWithNotesForProblem(problemId);
+    if (sessionsWithNotes.length === 0) {
+      return res.status(400).json({
+        error: "No sessions with notes found in this problem cohort. Add notes to sessions before analyzing."
+      });
+    }
+
+    console.log(`🔬 Analyzing problem "${problem.title}" with ${sessionsWithNotes.length} sessions`);
+
+    // Run analysis
+    const report = await aiAnalyst.analyzeProblemCohort(problem, sessionsWithNotes);
+
+    // Store report and timestamp
+    await db.query(
+      "UPDATE campaign_problems SET ai_report = $1, ai_analyzed_at = NOW() WHERE id = $2",
+      [report, problemId]
+    );
+
+    // Clear old chat history since report changed
+    await db.query("DELETE FROM problem_chat_messages WHERE problem_id = $1", [problemId]);
+
+    console.log(`✅ Problem analysis complete: "${problem.title}"`);
+
+    res.json({
+      success: true,
+      problem_id: problemId,
+      session_count: sessionsWithNotes.length,
+      report
+    });
+  } catch (err) {
+    console.error("Error in POST /api/problems/:problemId/analyze:", err);
+    res.status(500).json({ error: "Analysis failed: " + err.message });
+  }
+});
+
+// Get the analysis report for a problem
+app.get("/api/problems/:problemId/report", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+
+    const problem = await db.queryOne(
+      "SELECT id, title, ai_report, ai_analyzed_at FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    if (!problem.ai_report) {
+      return res.status(404).json({ error: "No analysis report found. Run analysis first." });
+    }
+
+    // Get session count for context
+    const countResult = await db.queryOne(`
+      SELECT COUNT(DISTINCT s.session_id) as count
+      FROM problem_sessions ps
+      JOIN sessions s ON ps.session_id = s.session_id
+      WHERE ps.problem_id = $1
+        AND EXISTS (SELECT 1 FROM problem_notes pn WHERE pn.session_id = s.session_id)
+    `, [problemId]);
+
+    res.json({
+      problem_id: problemId,
+      title: problem.title,
+      report: problem.ai_report,
+      analyzed_at: problem.ai_analyzed_at,
+      session_count: parseInt(countResult?.count || 0)
+    });
+  } catch (err) {
+    console.error("Error in GET /api/problems/:problemId/report:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Send a chat message about a problem analysis
+app.post("/api/problems/:problemId/chat", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+    const { message } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "message is required" });
+    }
+
+    // Check for Gemini API key
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(503).json({ error: "AI chat not configured (GEMINI_API_KEY missing)" });
+    }
+
+    // Fetch problem with report
+    const problem = await db.queryOne(
+      "SELECT id, campaign_id, title, description, ai_report FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+    if (!problem.ai_report) {
+      return res.status(400).json({ error: "No analysis report found. Run analysis first before chatting." });
+    }
+
+    // Get sessions with notes (for context)
+    const sessionsWithNotes = await getSessionsWithNotesForProblem(problemId);
+
+    // Get chat history
+    const { rows: chatHistory } = await db.query(
+      "SELECT role, content FROM problem_chat_messages WHERE problem_id = $1 ORDER BY created_at ASC",
+      [problemId]
+    );
+
+    // Get AI response
+    const response = await aiAnalyst.chatAboutProblem(
+      problem,
+      sessionsWithNotes,
+      problem.ai_report,
+      chatHistory,
+      message.trim()
+    );
+
+    // Store user message
+    const userMsgResult = await db.queryOne(
+      "INSERT INTO problem_chat_messages (problem_id, role, content) VALUES ($1, 'user', $2) RETURNING id",
+      [problemId, message.trim()]
+    );
+
+    // Store assistant response
+    const assistantMsgResult = await db.queryOne(
+      "INSERT INTO problem_chat_messages (problem_id, role, content) VALUES ($1, 'assistant', $2) RETURNING id",
+      [problemId, response]
+    );
+
+    res.json({
+      success: true,
+      user_message_id: userMsgResult.id,
+      assistant_message_id: assistantMsgResult.id,
+      response
+    });
+  } catch (err) {
+    console.error("Error in POST /api/problems/:problemId/chat:", err);
+    res.status(500).json({ error: "Chat failed: " + err.message });
+  }
+});
+
+// Get chat history for a problem
+app.get("/api/problems/:problemId/chat", authenticateJWT, async (req, res) => {
+  try {
+    const { problemId } = req.params;
+
+    // Verify problem exists
+    const problem = await db.queryOne(
+      "SELECT id, title FROM campaign_problems WHERE id = $1",
+      [problemId]
+    );
+    if (!problem) {
+      return res.status(404).json({ error: "Problem not found" });
+    }
+
+    // Get chat messages
+    const { rows: messages } = await db.query(
+      "SELECT id, role, content, created_at FROM problem_chat_messages WHERE problem_id = $1 ORDER BY created_at ASC",
+      [problemId]
+    );
+
+    res.json({
+      problem_id: problemId,
+      title: problem.title,
+      messages
+    });
+  } catch (err) {
+    console.error("Error in GET /api/problems/:problemId/chat:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =====================================================
 // NOTES ENDPOINTS
 // =====================================================
 

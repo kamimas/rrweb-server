@@ -167,7 +167,11 @@ CREATE TABLE IF NOT EXISTS campaign_problems (
     campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     description TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+
+    -- AI Analysis
+    ai_report TEXT,                                   -- Generated markdown analysis report
+    ai_analyzed_at TIMESTAMP WITH TIME ZONE          -- When analysis was last run
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaign_problems_campaign_id ON campaign_problems(campaign_id);
@@ -207,6 +211,20 @@ CREATE INDEX IF NOT EXISTS idx_notes_lookup ON problem_notes(campaign_id, proble
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON problem_notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notes_problem ON problem_notes(problem_id);
 CREATE INDEX IF NOT EXISTS idx_notes_session ON problem_notes(session_id);
+
+-- =============================================================================
+-- PROBLEM CHAT MESSAGES TABLE
+-- Stores chat history for AI conversations about problem analysis
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS problem_chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    problem_id UUID NOT NULL REFERENCES campaign_problems(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL,                        -- 'user' or 'assistant'
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_problem_chat_problem_id ON problem_chat_messages(problem_id);
 
 -- =============================================================================
 -- HELPER VIEWS (Optional, for convenience)

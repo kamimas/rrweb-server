@@ -493,6 +493,173 @@ async function runFullAnalysis(campaignId, campaignName, goldenTimelineText, dro
     return runCampaignAnalysis(campaignId, campaignName, missionBrief, goldenTimelineText, dropOffSessions, onProgress);
 }
 
+// =============================================================================
+// PROBLEM ANALYSIS FUNCTIONS
+// =============================================================================
+
+/**
+ * Analyze a Problem Cohort
+ *
+ * Takes sessions with notes from a problem cohort and generates a markdown report
+ * analyzing patterns, root causes, and recommendations.
+ *
+ * @param {object} problem - The problem object { id, title, description }
+ * @param {Array<object>} sessionsWithNotes - Sessions with metadata and notes
+ *   Each session: { session_id, location_country, location_city, location_region,
+ *                   device_os, device_browser, device_type, duration_ms, start_hour, notes: [] }
+ * @returns {Promise<string>} - Markdown report
+ */
+async function analyzeProblemCohort(problem, sessionsWithNotes) {
+    initClient();
+
+    console.log(`[AI] Analyzing problem cohort: "${problem.title}" (${sessionsWithNotes.length} sessions)`);
+
+    // Build structured session data
+    const sessionData = sessionsWithNotes.map(session => {
+        const notes = session.notes.map(n => `[${n.color}] ${n.content}`).join('; ');
+        return `<session id="${session.session_id}">
+  <location country="${session.location_country || ''}" city="${session.location_city || ''}" region="${session.location_region || ''}" />
+  <device type="${session.device_type || ''}" os="${session.device_os || ''}" browser="${session.device_browser || ''}" />
+  <duration_seconds>${session.duration_ms ? Math.round(session.duration_ms / 1000) : 'unknown'}</duration_seconds>
+  <start_hour>${session.start_hour !== null && session.start_hour !== undefined ? session.start_hour : 'unknown'}</start_hour>
+  <analyst_notes>${notes}</analyst_notes>
+</session>`;
+    }).join('\n');
+
+    const prompt = `<context>
+<problem title="${problem.title}">
+${problem.description || 'No description provided.'}
+</problem>
+</context>
+
+<sessions count="${sessionsWithNotes.length}">
+${sessionData}
+</sessions>
+
+<task>
+Analyze these flagged user sessions. Answer:
+1. What specific patterns appear across multiple sessions? Cite session IDs.
+2. Which device/browser/location combinations correlate with issues? Show counts.
+3. What is the most likely root cause based on the analyst notes?
+4. List 3 actionable fixes ranked by expected impact.
+
+When referencing sessions, use markdown links with format: [descriptive text](session:SESSION_ID)
+Example: [this user](session:sess_abc123) or [watch the hesitation](session:sess_xyz789)
+</task>
+
+<output_format>
+# ${problem.title}
+
+## Summary
+(2-3 sentences max)
+
+## Patterns
+- Pattern name: description (session IDs: ...)
+- ...
+
+## Device/Location Correlation
+| Factor | Count | Notes |
+|--------|-------|-------|
+| ... | ... | ... |
+
+(Or state "No significant correlation found" if data is insufficient)
+
+## Root Cause
+(1 paragraph, be specific)
+
+## Fixes
+1. **[HIGH]** ...
+2. **[MEDIUM]** ...
+3. **[LOW]** ...
+
+---
+*Based on ${sessionsWithNotes.length} sessions*
+</output_format>`;
+
+    const result = await client.models.generateContent({
+        model: MODEL_SMART,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            thinkingConfig: {
+                thinkingLevel: "HIGH"
+            }
+        }
+    });
+
+    return result.text;
+}
+
+/**
+ * Continue a chat conversation about a problem analysis
+ *
+ * @param {object} problem - The problem object { id, title, description }
+ * @param {Array<object>} sessionsWithNotes - Original session data used for analysis
+ * @param {string} report - The generated AI report
+ * @param {Array<object>} chatHistory - Previous messages [{ role, content }]
+ * @param {string} userMessage - The new user message
+ * @returns {Promise<string>} - Assistant response
+ */
+async function chatAboutProblem(problem, sessionsWithNotes, report, chatHistory, userMessage) {
+    initClient();
+
+    console.log(`[AI] Chat about problem: "${problem.title}" (${chatHistory.length} prior messages)`);
+
+    // Build compact session reference
+    const sessionRef = sessionsWithNotes.map(session => {
+        const loc = [session.location_country, session.location_city].filter(Boolean).join('/') || '?';
+        const dev = [session.device_type, session.device_browser].filter(Boolean).join('/') || '?';
+        const notes = session.notes.map(n => n.content).join('; ');
+        return `${session.session_id}: ${loc}, ${dev} — "${notes}"`;
+    }).join('\n');
+
+    // System context with structured data
+    const systemContext = `<context>
+<problem title="${problem.title}">${problem.description || ''}</problem>
+<sessions count="${sessionsWithNotes.length}">
+${sessionRef}
+</sessions>
+<report>
+${report}
+</report>
+</context>
+
+<instructions>
+Answer questions about this analysis. Reference session IDs when relevant. Be concise.
+</instructions>`;
+
+    // Build contents array with history
+    const contents = [
+        { role: "user", parts: [{ text: systemContext }] },
+        { role: "model", parts: [{ text: "Ready to answer questions about this problem analysis." }] }
+    ];
+
+    // Add chat history
+    for (const msg of chatHistory) {
+        contents.push({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: msg.content }]
+        });
+    }
+
+    // Add the new user message
+    contents.push({
+        role: "user",
+        parts: [{ text: userMessage }]
+    });
+
+    const result = await client.models.generateContent({
+        model: MODEL_SMART,
+        contents,
+        config: {
+            thinkingConfig: {
+                thinkingLevel: "HIGH"
+            }
+        }
+    });
+
+    return result.text;
+}
+
 module.exports = {
     // Core functions (new API)
     generateCustomRubric,
@@ -500,6 +667,10 @@ module.exports = {
     analyzeDropOff,
     generateCampaignReport,
     runCampaignAnalysis,
+
+    // Problem analysis functions
+    analyzeProblemCohort,
+    chatAboutProblem,
 
     // Legacy compatibility
     runFullAnalysis
