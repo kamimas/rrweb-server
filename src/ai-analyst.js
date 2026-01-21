@@ -526,55 +526,58 @@ async function analyzeProblemCohort(problem, sessionsWithNotes) {
 </session>`;
     }).join('\n');
 
-    const prompt = `<context>
-<problem title="${problem.title}">
-${problem.description || 'No description provided.'}
-</problem>
-</context>
+    const prompt = `You are a UX analyst investigating a recurring user problem. Your goal is to find what these problem sessions have in common so engineers can fix the root cause.
 
-<sessions count="${sessionsWithNotes.length}">
+<problem>
+Title: ${problem.title}
+Description: ${problem.description || 'No description provided.'}
+</problem>
+
+<sessions>
 ${sessionData}
 </sessions>
 
-<task>
-Analyze these flagged user sessions. Answer:
-1. What specific patterns appear across multiple sessions? Cite session IDs.
-2. Which device/browser/location combinations correlate with issues? Show counts.
-3. What is the most likely root cause based on the analyst notes?
-4. List 3 actionable fixes ranked by expected impact.
+<instructions>
+Analyze the ${sessionsWithNotes.length} sessions above. Look for factors that might explain why these users experienced this problem:
 
-When referencing sessions, use markdown links with format: [descriptive text](session:SESSION_ID)
-Example: [this user](session:sess_abc123) or [watch the hesitation](session:sess_xyz789)
-</task>
+1. **Device patterns**: Are certain device types (mobile/desktop), browsers, or operating systems over-represented?
+2. **Duration patterns**: Do short sessions or long sessions correlate with this issue?
+3. **Time patterns**: Does the problem occur more at certain hours?
+4. **Location patterns**: Any geographic concentration?
+5. **Behavioral patterns**: What do the analyst notes reveal about user actions leading to the problem?
 
-<output_format>
+For each factor, report the breakdown (e.g., "Mobile: 8/10 sessions, Desktop: 2/10 sessions"). Highlight any factor where one value appears in >60% of sessions.
+
+When referencing specific sessions, use this link format: [descriptive text](session:SESSION_ID)
+</instructions>
+
+Respond in this exact markdown format:
+
 # ${problem.title}
 
 ## Summary
-(2-3 sentences max)
+2-3 sentences: What is happening and who is affected.
 
-## Patterns
-- Pattern name: description (session IDs: ...)
-- ...
+## Contributing Factors
+| Factor | Breakdown | Significant? |
+|--------|-----------|--------------|
+| Device Type | mobile: X, desktop: Y | Yes/No |
+| Browser | chrome: X, safari: Y, ... | Yes/No |
+| OS | iOS: X, Windows: Y, ... | Yes/No |
+| Duration | <1min: X, 1-5min: Y, >5min: Z | Yes/No |
+| Time of Day | morning: X, afternoon: Y, ... | Yes/No |
+| Location | US: X, EU: Y, ... | Yes/No |
 
-## Device/Location Correlation
-| Factor | Count | Notes |
-|--------|-------|-------|
-| ... | ... | ... |
+## Key Patterns
+Bullet points describing behavioral patterns from analyst notes. Link to specific sessions.
 
-(Or state "No significant correlation found" if data is insufficient)
+## Root Cause Hypothesis
+One paragraph: Your best guess at why this is happening, based on the data.
 
-## Root Cause
-(1 paragraph, be specific)
-
-## Fixes
-1. **[HIGH]** ...
-2. **[MEDIUM]** ...
-3. **[LOW]** ...
-
----
-*Based on ${sessionsWithNotes.length} sessions*
-</output_format>`;
+## Recommended Fixes
+1. **[HIGH]** Most impactful fix
+2. **[MEDIUM]** Secondary fix
+3. **[LOW]** Nice-to-have fix`;
 
     const result = await client.models.generateContent({
         model: MODEL_SMART,
